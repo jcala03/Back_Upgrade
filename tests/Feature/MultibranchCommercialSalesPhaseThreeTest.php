@@ -141,7 +141,7 @@ class MultibranchCommercialSalesPhaseThreeTest extends TestCase
         $stock = $this->stock($branch, $product, 1);
         $otherStock = $this->stock($otherBranch, $product, 20);
 
-        $orderId = $this->postJson('/api/orders', $this->publicPayload($product, 2))
+        $orderId = $this->withHeader('Idempotency-Key', __METHOD__)->postJson('/api/orders', $this->publicPayload($product, 2))
             ->assertCreated()
             ->assertJsonPath('data.branch_id', null)
             ->json('data.id');
@@ -542,7 +542,7 @@ class MultibranchCommercialSalesPhaseThreeTest extends TestCase
         $destination = $this->branch('VUP');
         $product = $this->product();
         $stock = $this->stock($source, $product, 3);
-        $orderId = $this->postJson('/api/orders', $this->publicPayload($product, 2))
+        $orderId = $this->withHeader('Idempotency-Key', __METHOD__)->postJson('/api/orders', $this->publicPayload($product, 2))
             ->assertCreated()->json('data.id');
         $transferId = $this->postJson('/api/admin/inventory/transfers', [
             'source_branch_id' => $source->id,

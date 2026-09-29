@@ -189,7 +189,7 @@ class OperationalAuthorizationTest extends TestCase
 
     private function pendingOrder(Product $product): Order
     {
-        $response = $this->postJson('/api/orders', [
+        $response = $this->withHeader('Idempotency-Key', __METHOD__.'-'.$product->id)->postJson('/api/orders', [
             'customer_name' => 'Cliente',
             'customer_email' => 'cliente@example.com',
             'customer_phone' => '3000000000',

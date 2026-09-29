@@ -408,7 +408,7 @@ class CommissionLifecyclePhaseFourTest extends TestCase
         $seller = $this->employee($branch);
         $product = $this->product(true, 50000);
         $stock = $this->stock($branch, $product, 4);
-        $orderId = $this->postJson('/api/orders', [
+        $orderId = $this->withHeader('Idempotency-Key', __METHOD__)->postJson('/api/orders', [
             'customer_name' => 'Cliente temporal',
             'customer_email' => 'qa@example.com',
             'customer_phone' => '3000000000',

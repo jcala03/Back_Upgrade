@@ -11,9 +11,18 @@ class StorePublicOrderRequest extends FormRequest
         return true;
     }
 
+    public function validationData(): array
+    {
+        return [
+            ...parent::validationData(),
+            'idempotency_key' => $this->header('Idempotency-Key'),
+        ];
+    }
+
     public function rules(): array
     {
         return [
+            'idempotency_key' => ['required', 'string', 'max:255', 'regex:/^[\x21-\x7E]+$/'],
             'customer_name' => ['required', 'string', 'min:3', 'max:120'],
             'customer_email' => ['required', 'email', 'max:160'],
             'customer_phone' => ['required', 'string', 'min:7', 'max:40'],

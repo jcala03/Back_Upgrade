@@ -103,7 +103,7 @@ class ConfigurationPhaseOneTest extends TestCase
         Mail::fake();
         config()->set('business.order_notification_email', 'fallback@example.com');
         $product = $this->product();
-        $this->postJson('/api/orders', $this->publicOrderPayload($product))->assertCreated();
+        $this->withHeader('Idempotency-Key', __METHOD__.'-fallback')->postJson('/api/orders', $this->publicOrderPayload($product))->assertCreated();
         Mail::assertSent(OrderCreatedMail::class, fn (OrderCreatedMail $mail) => str_contains($mail->envelope()->subject, 'UP GRADE 79'));
         Mail::assertSent(NewOrderNotificationMail::class, fn (NewOrderNotificationMail $mail) => $mail->hasTo('fallback@example.com'));
 
@@ -114,7 +114,7 @@ class ConfigurationPhaseOneTest extends TestCase
             'order_notification_email' => 'override@example.com',
         ]), $admin);
         Mail::fake();
-        $this->postJson('/api/orders', $this->publicOrderPayload($product))->assertCreated();
+        $this->withHeader('Idempotency-Key', __METHOD__.'-configured')->postJson('/api/orders', $this->publicOrderPayload($product))->assertCreated();
         Mail::assertSent(OrderCreatedMail::class, fn (OrderCreatedMail $mail) => str_contains($mail->envelope()->subject, 'Negocio QA') && $mail->business['whatsapp'] === '3001112233');
         Mail::assertSent(NewOrderNotificationMail::class, fn (NewOrderNotificationMail $mail) => $mail->hasTo('override@example.com'));
     }

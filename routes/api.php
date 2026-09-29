@@ -51,6 +51,7 @@ use Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful;
 
 // Exact stateless route: no Sanctum session/cookies/CSRF pipeline, including first-party Origin.
 Route::post('/webhooks/wompi', WompiWebhookController::class)
+    ->middleware('throttle:wompi-webhook')
     ->withoutMiddleware(EnsureFrontendRequestsAreStateful::class);
 
 Route::get('/health', function () {
@@ -85,14 +86,14 @@ Route::get('/vehicle-models', [VehicleModelController::class, 'index']);
 Route::get('/vehicle-versions', [VehicleVersionController::class, 'index']);
 Route::get('/vehicle-multimedia-systems', [VehicleMultimediaSystemController::class, 'index']);
 
-Route::post('/orders', [OrderController::class, 'store']);
+Route::post('/orders', [OrderController::class, 'store'])->middleware('throttle:public-orders');
 Route::get('/checkout/orders/{publicToken}', [CheckoutOrderController::class, 'show']);
-Route::post('/checkout/orders/{publicToken}/payments/wompi', [CheckoutPaymentController::class, 'store']);
-Route::put('/checkout/orders/{publicToken}/shipping-address', [CheckoutOrderController::class, 'address']);
-Route::post('/checkout/orders/{publicToken}/shipping-quotes', [CheckoutOrderController::class, 'quotes']);
-Route::post('/checkout/orders/{publicToken}/shipping-quotes/apply', [CheckoutOrderController::class, 'applyQuote']);
+Route::post('/checkout/orders/{publicToken}/payments/wompi', [CheckoutPaymentController::class, 'store'])->middleware('throttle:checkout-payment');
+Route::put('/checkout/orders/{publicToken}/shipping-address', [CheckoutOrderController::class, 'address'])->middleware('throttle:checkout-mutations');
+Route::post('/checkout/orders/{publicToken}/shipping-quotes', [CheckoutOrderController::class, 'quotes'])->middleware('throttle:checkout-shipping');
+Route::post('/checkout/orders/{publicToken}/shipping-quotes/apply', [CheckoutOrderController::class, 'applyQuote'])->middleware('throttle:checkout-shipping');
 Route::get('/checkout/orders/{publicToken}/pickup-branches', [CheckoutOrderController::class, 'pickupBranches']);
-Route::post('/checkout/orders/{publicToken}/pickup', [CheckoutOrderController::class, 'applyPickup']);
+Route::post('/checkout/orders/{publicToken}/pickup', [CheckoutOrderController::class, 'applyPickup'])->middleware('throttle:checkout-mutations');
 
 /*
 |--------------------------------------------------------------------------

@@ -24,7 +24,7 @@ class PublicCheckoutService
         private readonly OrderTotalService $totals,
     ) {}
 
-    /** @return array{0: Order, 1: string, 2: bool} */
+    /** @return array{0: Order, 1: string|null, 2: bool} */
     public function create(array $data, string $key): array
     {
         $fingerprint = hash('sha256', json_encode($this->sort($data), JSON_THROW_ON_ERROR));
@@ -34,10 +34,10 @@ class PublicCheckoutService
                 throw new EcommerceShippingException('IDEMPOTENCY_CONFLICT', 'La llave de idempotencia ya fue usada con una solicitud distinta.');
             }
 
-            return [$this->load($existing), '', true];
+            return [$this->load($existing), $this->replayToken($existing), true];
         }
 
-        $token = bin2hex(random_bytes(32));
+        $token = $this->publicToken($key);
         try {
             $order = $this->orders->createPublic($data, hash('sha256', $token), $key, $fingerprint);
         } catch (QueryException) {
@@ -46,7 +46,7 @@ class PublicCheckoutService
                 throw new EcommerceShippingException('IDEMPOTENCY_CONFLICT', 'La llave de idempotencia ya fue usada con una solicitud distinta.');
             }
 
-            return [$this->load($existing), '', true];
+            return [$this->load($existing), $this->replayToken($existing), true];
         }
 
         return [$this->load($order), $token, false];
@@ -178,6 +178,18 @@ class PublicCheckoutService
     private function load(Order $order): Order
     {
         return $order->fresh(['items', 'charges', 'shippingAddress', 'branch']);
+    }
+
+    private function publicToken(string $idempotencyKey): string
+    {
+        return hash_hmac('sha256', 'public-order:'.$idempotencyKey, (string) config('app.key'));
+    }
+
+    private function replayToken(Order $order): ?string
+    {
+        $token = $this->publicToken((string) $order->checkout_idempotency_key);
+
+        return hash_equals((string) $order->public_token_hash, hash('sha256', $token)) ? $token : null;
     }
 
     private function sort(array $value): array

@@ -10,6 +10,7 @@ use App\Models\Payment;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\WebhookEvent;
+use App\Providers\AppServiceProvider;
 use App\Services\PublicCheckoutService;
 use App\Services\WompiCheckoutService;
 use Illuminate\Contracts\Console\Kernel;
@@ -18,6 +19,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
@@ -125,6 +127,28 @@ class EcommercePaymentInitPhaseSevenTest extends TestCase
         $this->assertDatabaseCount('inventory_movements', 1);
         $this->assertSame(3, $stock->fresh()->quantity);
         $this->assertTrue($expiry->equalTo($order->fresh()->stock_reservation_expires_at));
+    }
+
+    public function test_payment_init_rate_limit_allows_idempotent_retries_and_blocks_extra_effects(): void
+    {
+        [$order, $token, $stock] = $this->fixture();
+        $identity = hash('sha256', $token).'|127.0.0.1';
+        RateLimiter::clear(md5('checkout-payment'.$identity));
+
+        for ($attempt = 1; $attempt <= AppServiceProvider::CHECKOUT_PAYMENT_REQUESTS_PER_MINUTE; $attempt++) {
+            $response = $this->init($token, __METHOD__);
+            $attempt === 1 ? $response->assertCreated() : $response->assertOk();
+        }
+
+        $this->init($token, __METHOD__)
+            ->assertStatus(429)
+            ->assertHeader('Retry-After')
+            ->assertJsonPath('message', 'Too Many Attempts.');
+
+        $this->assertDatabaseCount('payments', 1);
+        $this->assertDatabaseCount('inventory_movements', 1);
+        $this->assertSame(3, $stock->fresh()->quantity);
+        $this->assertTrue($order->fresh()->stock_reservation_expires_at->equalTo(Payment::sole()->expires_at));
     }
 
     public function test_replay_freezes_public_config_while_new_retry_uses_rotated_config(): void

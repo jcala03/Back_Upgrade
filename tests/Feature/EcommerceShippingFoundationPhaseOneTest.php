@@ -166,7 +166,7 @@ class EcommerceShippingFoundationPhaseOneTest extends TestCase
         ]);
         $payload = $this->publicPayload($product);
 
-        $this->postJson('/api/orders', [
+        $this->withHeader('Idempotency-Key', __METHOD__.'-authoritative')->postJson('/api/orders', [
             ...$payload,
             'subtotal' => 1,
             'charges_total' => 1,
@@ -181,7 +181,7 @@ class EcommerceShippingFoundationPhaseOneTest extends TestCase
         ]);
         $this->assertDatabaseCount('orders', 0);
 
-        $this->postJson('/api/orders', $payload)
+        $this->withHeader('Idempotency-Key', __METHOD__.'-valid')->postJson('/api/orders', $payload)
             ->assertCreated()
             ->assertJsonPath('data.subtotal', 150000)
             ->assertJsonPath('data.discount_total', 0)

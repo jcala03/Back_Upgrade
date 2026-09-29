@@ -279,7 +279,7 @@ class ServicesPhaseOneTest extends TestCase
     public function test_public_ecommerce_remains_product_only(): void
     {
         $service = $this->service();
-        $this->postJson('/api/orders', [
+        $this->withHeader('Idempotency-Key', __METHOD__)->postJson('/api/orders', [
             'customer_name' => 'Cliente', 'customer_email' => 'cliente@example.com', 'customer_phone' => '3000000000',
             'items' => [['item_type' => 'service', 'service_id' => $service->id, 'quantity' => 1]],
         ])->assertUnprocessable();

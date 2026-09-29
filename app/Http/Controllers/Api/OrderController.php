@@ -33,18 +33,12 @@ class OrderController extends Controller
 
     public function store(StorePublicOrderRequest $request): JsonResponse
     {
-        $key = trim((string) $request->header('Idempotency-Key'));
-        if ($key !== '' && mb_strlen($key) > 255) {
-            return response()->json(['message' => 'Idempotency-Key no es válido.', 'errors' => ['Idempotency-Key' => ['Idempotency-Key no es válido.']]], 422);
-        }
+        $data = $request->validated();
+        $key = $data['idempotency_key'];
+        unset($data['idempotency_key']);
+
         try {
-            if ($key === '') {
-                $order = $this->orders->createPublic($request->validated());
-                $publicToken = null;
-                $replayed = false;
-            } else {
-                [$order, $publicToken, $replayed] = $this->checkout->create($request->validated(), $key);
-            }
+            [$order, $publicToken, $replayed] = $this->checkout->create($data, $key);
         } catch (EcommerceShippingException $exception) {
             return response()->json(['message' => 'No fue posible crear la orden.', 'code' => $exception->errorCode], 422);
         }
@@ -54,7 +48,7 @@ class OrderController extends Controller
 
         return response()->json([
             'message' => $replayed ? 'Orden recuperada correctamente.' : 'Orden creada correctamente.',
-            'public_token' => $publicToken ?: null,
+            'public_token' => $publicToken,
             'data' => (new PublicOrderResource($order))->resolve($request),
         ], $replayed ? 200 : 201);
     }

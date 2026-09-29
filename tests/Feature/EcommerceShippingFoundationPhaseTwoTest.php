@@ -12,6 +12,7 @@ use App\Models\OrderCharge;
 use App\Models\OrderItem;
 use App\Models\Product;
 use App\Models\ProductVariant;
+use App\Providers\AppServiceProvider;
 use App\Services\EcommerceFulfillmentBranchResolver;
 use App\Services\LogisticsSnapshotResolver;
 use App\Services\OrderTotalService;
@@ -26,6 +27,7 @@ use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\RateLimiter;
 use Tests\TestCase;
 
 class EcommerceShippingFoundationPhaseTwoTest extends TestCase
@@ -239,7 +241,7 @@ class EcommerceShippingFoundationPhaseTwoTest extends TestCase
             'items' => [['product_id' => $product->id, 'quantity' => 1]],
         ];
 
-        $this->postJson('/api/orders', $payload)
+        $this->withHeader('Idempotency-Key', __METHOD__)->postJson('/api/orders', $payload)
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['shipping_total', 'charges']);
         $this->assertDatabaseCount('orders', 0);
@@ -294,6 +296,34 @@ class EcommerceShippingFoundationPhaseTwoTest extends TestCase
         $this->assertShippingError(EcommerceShippingException::MISSING_SHIPPING_ADDRESS, fn () => $service->quote($order));
         $this->address($order);
         $this->assertShippingError(EcommerceShippingException::NO_QUOTES_AVAILABLE, fn () => $service->quote($order->fresh()));
+    }
+
+    public function test_shipping_quote_rate_limit_blocks_provider_calls_after_the_limit(): void
+    {
+        [$order] = $this->quotableOrder();
+        $token = bin2hex(random_bytes(32));
+        $order->update([
+            'origin' => Order::ORIGIN_ECOMMERCE,
+            'public_token_hash' => hash('sha256', $token),
+        ]);
+        $provider = new FakeShippingQuoteProvider([$this->quoteResult(25000)]);
+        $this->app->instance(ShippingQuoteProvider::class, $provider);
+        $identity = hash('sha256', $token).'|127.0.0.1';
+        RateLimiter::clear(md5('checkout-shipping'.$identity));
+
+        for ($attempt = 1; $attempt <= AppServiceProvider::CHECKOUT_SHIPPING_REQUESTS_PER_MINUTE; $attempt++) {
+            $this->postJson('/api/checkout/orders/'.$token.'/shipping-quotes')
+                ->assertOk()
+                ->assertJsonCount(1, 'data.quotes');
+        }
+
+        $this->postJson('/api/checkout/orders/'.$token.'/shipping-quotes')
+            ->assertStatus(429)
+            ->assertHeader('Retry-After')
+            ->assertJsonPath('message', 'Too Many Attempts.');
+
+        $this->assertSame(AppServiceProvider::CHECKOUT_SHIPPING_REQUESTS_PER_MINUTE, $provider->calls);
+        $this->assertDatabaseCount('order_charges', 0);
     }
 
     private function branch(string $code, int $priority): Branch
@@ -482,6 +512,8 @@ class FakeShippingQuoteProvider implements ShippingQuoteProvider
 {
     public ?ShippingQuoteRequest $lastRequest = null;
 
+    public int $calls = 0;
+
     /** @param list<ShippingQuoteResult> $quotes */
     public function __construct(
         private readonly array $quotes,
@@ -489,6 +521,7 @@ class FakeShippingQuoteProvider implements ShippingQuoteProvider
 
     public function quote(ShippingQuoteRequest $request): array
     {
+        $this->calls++;
         $this->lastRequest = $request;
 
         return $this->quotes;

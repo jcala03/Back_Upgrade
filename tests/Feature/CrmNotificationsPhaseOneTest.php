@@ -142,7 +142,7 @@ class CrmNotificationsPhaseOneTest extends TestCase
         $admin = $this->user('admin');
         $sales = $this->user('user');
         $product = $this->product(stock: 10, minimum: 1);
-        $orderId = $this->postJson('/api/orders', [
+        $orderId = $this->withHeader('Idempotency-Key', __METHOD__)->postJson('/api/orders', [
             'customer_name' => 'Dato privado', 'customer_email' => 'private@example.com', 'customer_phone' => '3001234567',
             'items' => [['product_id' => $product->id, 'quantity' => 1]],
         ])->assertCreated()->json('data.id');

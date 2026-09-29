@@ -41,19 +41,19 @@ class OrderSalesPhaseOneTest extends TestCase
     public function test_public_simple_order_is_pending_uses_backend_price_and_preserves_stock_and_snapshots(): void
     {
         $product = $this->product(price: 250000, cost: 100000);
-        $response = $this->postJson('/api/orders', $this->publicPayload($product, ['unit_price' => 1]));
+        $response = $this->withHeader('Idempotency-Key', __METHOD__.'-invalid')->postJson('/api/orders', $this->publicPayload($product, ['unit_price' => 1]));
         $response->assertUnprocessable()->assertJsonValidationErrors('items.0.unit_price');
 
-        $this->postJson('/api/orders', $this->publicPayload($product))->assertCreated()->assertJsonPath('data.status', 'pending');
+        $this->withHeader('Idempotency-Key', __METHOD__.'-valid')->postJson('/api/orders', $this->publicPayload($product))->assertCreated()->assertJsonPath('data.status', 'pending');
         $this->assertDatabaseHas('order_items', ['product_id' => $product->id, 'product_name' => $product->name, 'product_sku' => $product->sku, 'unit_price' => 250000, 'unit_cost' => 100000, 'quantity' => 2, 'subtotal' => 500000, 'total' => 500000]);
     }
 
     public function test_public_rejects_inactive_product_but_defers_stock_validation_until_confirmation(): void
     {
         $inactive = $this->product(active: false);
-        $this->postJson('/api/orders', $this->publicPayload($inactive))->assertUnprocessable();
+        $this->withHeader('Idempotency-Key', __METHOD__.'-inactive')->postJson('/api/orders', $this->publicPayload($inactive))->assertUnprocessable();
         $low = $this->product();
-        $this->postJson('/api/orders', $this->publicPayload($low))
+        $this->withHeader('Idempotency-Key', __METHOD__.'-low-stock')->postJson('/api/orders', $this->publicPayload($low))
             ->assertCreated()
             ->assertJsonPath('data.status', Order::STATUS_PENDING)
             ->assertJsonMissingPath('data.branch_id');
@@ -66,20 +66,20 @@ class OrderSalesPhaseOneTest extends TestCase
         $linux = $this->variant($product, 'Linux', 600000);
         $payload = $this->publicPayload($product, ['product_variant_id' => $android->id, 'quantity' => 1]);
         $payload['items'][] = ['product_id' => $product->id, 'product_variant_id' => $linux->id, 'quantity' => 1];
-        $this->postJson('/api/orders', $payload)->assertCreated();
+        $this->withHeader('Idempotency-Key', __METHOD__.'-variants')->postJson('/api/orders', $payload)->assertCreated();
         $this->assertSame(2, Order::latest()->first()->items()->count());
         $this->assertDatabaseHas('order_items', ['product_variant_id' => $android->id, 'variant_sku' => $android->sku, 'unit_price' => 700000]);
 
         $other = $this->product();
-        $this->postJson('/api/orders', $this->publicPayload($other, ['product_variant_id' => $android->id]))->assertUnprocessable();
-        $this->postJson('/api/orders', $this->publicPayload($product))->assertCreated()->assertJsonPath('data.items.0.product_variant_id', $android->id);
+        $this->withHeader('Idempotency-Key', __METHOD__.'-wrong-product')->postJson('/api/orders', $this->publicPayload($other, ['product_variant_id' => $android->id]))->assertUnprocessable();
+        $this->withHeader('Idempotency-Key', __METHOD__.'-default')->postJson('/api/orders', $this->publicPayload($product))->assertCreated()->assertJsonPath('data.items.0.product_variant_id', $android->id);
     }
 
     public function test_public_order_response_contains_only_public_order_and_item_snapshots(): void
     {
         $product = $this->product(price: 700000, cost: 320000);
         $variant = $this->variant($product, '8/128', 750000, true);
-        $response = $this->postJson('/api/orders', $this->publicPayload($product, [
+        $response = $this->withHeader('Idempotency-Key', __METHOD__)->postJson('/api/orders', $this->publicPayload($product, [
             'product_variant_id' => $variant->id,
             'quantity' => 1,
         ]))->assertCreated();
@@ -115,7 +115,7 @@ class OrderSalesPhaseOneTest extends TestCase
     {
         $product = $this->product();
         $this->variant($product, 'A', 1000);
-        $this->postJson('/api/orders', $this->publicPayload($product))->assertUnprocessable();
+        $this->withHeader('Idempotency-Key', __METHOD__)->postJson('/api/orders', $this->publicPayload($product))->assertUnprocessable();
     }
 
     public function test_admin_sale_can_have_no_customer_and_confirms_product_stock_once(): void
@@ -155,7 +155,7 @@ class OrderSalesPhaseOneTest extends TestCase
         $branch = $this->branch();
         $product = $this->product();
         $stock = $this->seedStock($branch, $product, 1);
-        $orderId = $this->postJson('/api/orders', $this->publicPayload($product, ['quantity' => 1]))->assertCreated()->json('data.id');
+        $orderId = $this->withHeader('Idempotency-Key', __METHOD__)->postJson('/api/orders', $this->publicPayload($product, ['quantity' => 1]))->assertCreated()->json('data.id');
         $stock->update(['quantity' => 0]);
         $this->postJson("/api/admin/orders/{$orderId}/status", ['status' => 'confirmed', 'branch_id' => $branch->id])->assertUnprocessable();
         $this->assertSame('pending', Order::find($orderId)->status);
@@ -173,7 +173,7 @@ class OrderSalesPhaseOneTest extends TestCase
     {
         $this->admin();
         $product = $this->product();
-        $id = $this->postJson('/api/orders', $this->publicPayload($product))->json('data.id');
+        $id = $this->withHeader('Idempotency-Key', __METHOD__)->postJson('/api/orders', $this->publicPayload($product))->json('data.id');
         $this->postJson("/api/admin/orders/{$id}/status", ['status' => 'cancelled'])->assertOk();
         $this->assertDatabaseCount('inventory_movements', 0);
         $this->postJson("/api/admin/orders/{$id}/status", ['status' => 'confirmed'])->assertUnprocessable();

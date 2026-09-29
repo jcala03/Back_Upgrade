@@ -8,6 +8,7 @@ use App\Models\InventoryStock;
 use App\Models\Payment;
 use App\Models\Product;
 use App\Models\WebhookEvent;
+use App\Providers\AppServiceProvider;
 use App\Services\EcommercePaymentService;
 use App\Services\PublicCheckoutService;
 use Illuminate\Contracts\Console\Kernel;
@@ -18,6 +19,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Str;
 use Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -86,6 +88,40 @@ class WompiWebhookPhaseSevenTest extends TestCase
     public static function checksumLocations(): array
     {
         return [['body'], ['header'], ['both']];
+    }
+
+    public function test_webhook_rate_limit_tolerates_reasonable_bursts_and_enforces_its_high_ceiling(): void
+    {
+        $this->fixture();
+        $event = $this->event();
+        Http::fake(['https://sandbox.wompi.co/v1/transactions/tx-123' => Http::response(['data' => $this->transaction()])]);
+        $limiterKey = md5('wompi-webhook127.0.0.1');
+        RateLimiter::clear($limiterKey);
+        $limiter = app(\Illuminate\Cache\RateLimiter::class)->limiter('wompi-webhook');
+        $limit = $limiter(Request::create('/api/webhooks/wompi', 'POST'));
+
+        $this->assertSame(AppServiceProvider::WOMPI_WEBHOOK_REQUESTS_PER_MINUTE, $limit->maxAttempts);
+        $this->assertSame(60, $limit->decaySeconds);
+        $this->assertSame('127.0.0.1', $limit->key);
+
+        for ($attempt = 1; $attempt <= 20; $attempt++) {
+            $this->postJson('/api/webhooks/wompi', $event)
+                ->assertOk()
+                ->assertJsonPath('status', 'processed');
+        }
+
+        RateLimiter::increment(
+            $limiterKey,
+            60,
+            AppServiceProvider::WOMPI_WEBHOOK_REQUESTS_PER_MINUTE - 20,
+        );
+        $this->postJson('/api/webhooks/wompi', $event)
+            ->assertStatus(429)
+            ->assertHeader('Retry-After')
+            ->assertJsonPath('message', 'Too Many Attempts.');
+
+        $this->assertDatabaseCount('webhook_events', 1);
+        Http::assertSentCount(1);
     }
 
     #[DataProvider('invalidEvents')]
