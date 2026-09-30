@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Exceptions\EcommercePaymentException;
 use App\Models\Order;
 use App\Models\Payment;
+use App\Models\PaymentReconciliationReview;
 use App\Support\Payments\CopAmount;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
@@ -105,7 +106,11 @@ class EcommercePaymentService
 
     private function assertPayable(Order $order): void
     {
-        if ($order->payments()->whereNotNull('reconciliation_required_at')->exists()) {
+        if ($order->payments()->where(function ($payments) {
+            $payments->whereNotNull('reconciliation_required_at')
+                ->orWhereHas('reconciliationReviews', fn ($reviews) => $reviews
+                    ->where('state', '!=', PaymentReconciliationReview::STATE_RESOLVED));
+        })->exists()) {
             throw new EcommercePaymentException(EcommercePaymentException::PAYMENT_RECONCILIATION_REQUIRED);
         }
         if ($order->origin !== Order::ORIGIN_ECOMMERCE

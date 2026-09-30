@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\CrmNotification;
 use App\Models\Order;
 use App\Models\Payment;
+use App\Models\PaymentReconciliationReview;
 use App\Support\Payments\WompiTransaction;
 
 class WompiPaymentReconciliationService
@@ -61,7 +62,10 @@ class WompiPaymentReconciliationService
         $remaining = max(0, $total);
         $hasCredit = false;
         foreach ($order->payments()->where('status', Payment::STATUS_COMPLETED)
-            ->whereNull('reconciliation_required_at')->where('currency', $order->currency)->get() as $credit) {
+            ->whereNull('reconciliation_required_at')
+            ->whereDoesntHave('reconciliationReviews', fn ($reviews) => $reviews
+                ->where('state', '!=', PaymentReconciliationReview::STATE_RESOLVED))
+            ->where('currency', $order->currency)->get() as $credit) {
             if ($credit->currency !== $order->currency || $credit->amount <= 0) {
                 continue;
             }

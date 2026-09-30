@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Exceptions\WompiWebhookException;
 use App\Models\Order;
 use App\Models\Payment;
+use App\Models\PaymentReconciliationReview;
 use App\Support\Payments\WompiTransaction;
 
 class WompiPaymentTransitionService
@@ -37,7 +38,9 @@ class WompiPaymentTransitionService
             return;
         }
         if ($transaction->status === 'VOIDED' && $payment->status === Payment::STATUS_REFUNDED
-            && $payment->provider_status === 'VOIDED' && $payment->reconciliation_required_at !== null) {
+            && $payment->provider_status === 'VOIDED'
+            && ($payment->reconciliation_required_at !== null
+                || $payment->reconciliationReviews()->where('state', '!=', PaymentReconciliationReview::STATE_RESOLVED)->exists())) {
             return;
         }
 
@@ -49,7 +52,10 @@ class WompiPaymentTransitionService
             || ! in_array($payment->status, [Payment::STATUS_PENDING, Payment::STATUS_FAILED], true)
             || $payment->paid_at !== null
             || $order->payments()->where(function ($query) {
-                $query->where('status', Payment::STATUS_COMPLETED)->orWhereNotNull('reconciliation_required_at');
+                $query->where('status', Payment::STATUS_COMPLETED)
+                    ->orWhereNotNull('reconciliation_required_at')
+                    ->orWhereHas('reconciliationReviews', fn ($reviews) => $reviews
+                        ->where('state', '!=', PaymentReconciliationReview::STATE_RESOLVED));
             })->exists()) {
             throw new WompiWebhookException('WOMPI_TRANSITION_OUT_OF_SCOPE', 409);
         }

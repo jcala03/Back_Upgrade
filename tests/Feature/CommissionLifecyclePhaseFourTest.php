@@ -467,6 +467,39 @@ class CommissionLifecyclePhaseFourTest extends TestCase
         $this->assertDatabaseCount('crm_notifications', 0);
     }
 
+    public function test_payment_after_operational_completion_does_not_repeat_stock_or_commission_side_effects(): void
+    {
+        $this->admin();
+        $branch = $this->branch();
+        $seller = $this->employee($branch);
+        $product = $this->product(true, 50000);
+        $stock = $this->stock($branch, $product, 5);
+        $orderId = $this->adminSale($branch, $seller, $product, 2);
+
+        $this->postJson("/api/admin/orders/{$orderId}/status", [
+            'status' => Order::STATUS_COMPLETED,
+        ])->assertOk();
+
+        $order = Order::findOrFail($orderId);
+        $commission = EmployeeCommission::where('order_id', $orderId)->sole();
+        $earnedAt = $commission->earned_at?->getTimestamp();
+        $movementCount = InventoryMovement::where('reference_id', $orderId)->count();
+        $stockAfterCompletion = $stock->fresh()->quantity;
+
+        $this->postJson("/api/admin/orders/{$orderId}/payments", [
+            'amount' => $order->total,
+            'method' => 'cash',
+        ])->assertCreated()->assertJsonPath('order.status', Order::STATUS_COMPLETED)
+            ->assertJsonPath('order.payment_status', Order::PAYMENT_PAID);
+
+        $this->assertSame($stockAfterCompletion, $stock->fresh()->quantity);
+        $this->assertSame($movementCount, InventoryMovement::where('reference_id', $orderId)->count());
+        $this->assertDatabaseCount('employee_commissions', 1);
+        $this->assertSame(EmployeeCommission::STATUS_EARNED, $commission->fresh()->status);
+        $this->assertSame($earnedAt, $commission->fresh()->earned_at?->getTimestamp());
+        $this->assertSame(100000, $commission->fresh()->amount);
+    }
+
     public function test_notification_failure_never_blocks_completion(): void
     {
         $this->admin();

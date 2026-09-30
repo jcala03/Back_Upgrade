@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Order;
 use App\Models\Payment;
+use App\Models\PaymentReconciliationReview;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -58,7 +59,11 @@ class EcommerceStockReservationExpiryService
                 return self::OUTCOME_SKIPPED;
             }
 
-            if ($payments->contains(fn (Payment $payment): bool => $payment->reconciliation_required_at !== null)) {
+            if ($payments->contains(fn (Payment $payment): bool => $payment->reconciliation_required_at !== null)
+                || PaymentReconciliationReview::query()
+                    ->whereIn('payment_id', $payments->pluck('id'))
+                    ->where('state', '!=', PaymentReconciliationReview::STATE_RESOLVED)
+                    ->exists()) {
                 return self::OUTCOME_RECONCILIATION;
             }
 
@@ -88,6 +93,8 @@ class EcommerceStockReservationExpiryService
         foreach ($payments as $payment) {
             if ($payment->status !== Payment::STATUS_COMPLETED
                 || $payment->reconciliation_required_at !== null
+                || $payment->reconciliationReviews()
+                    ->where('state', '!=', PaymentReconciliationReview::STATE_RESOLVED)->exists()
                 || $payment->currency !== $order->currency
                 || $payment->amount <= 0) {
                 continue;

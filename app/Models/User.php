@@ -87,6 +87,7 @@ class User extends Authenticatable
 
                 'payments.view',
                 'payments.create',
+                'payments.reconcile',
 
                 'quotations.view',
                 'quotations.create',

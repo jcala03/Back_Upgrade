@@ -6,6 +6,7 @@ use App\Models\Branch;
 use App\Models\InventoryItem;
 use App\Models\InventoryStock;
 use App\Models\Payment;
+use App\Models\PaymentReconciliationReview;
 use App\Models\Product;
 use App\Models\WebhookEvent;
 use App\Providers\AppServiceProvider;
@@ -246,6 +247,13 @@ class WompiWebhookPhaseSevenTest extends TestCase
             Log::shouldNotHaveReceived($level);
         }
         $this->assertStringNotContainsString('fixture', json_encode($ledger->getAttributes()));
+        if ($code === 'WOMPI_TRANSACTION_NOT_FOUND') {
+            $review = PaymentReconciliationReview::sole();
+            $this->assertSame($code, $review->reason);
+            $this->assertNull($review->payment_id);
+        } else {
+            $this->assertDatabaseCount('payment_reconciliation_reviews', 0);
+        }
     }
 
     public static function providerFailures(): array
@@ -323,6 +331,7 @@ class WompiWebhookPhaseSevenTest extends TestCase
             $this->assertSame('TRANSACTION_CONFLICT', $payment->fresh()->reconciliation_reason);
             $this->assertSame('tx-other', $payment->fresh()->transaction_id);
             $this->assertSame('pending', $payment->fresh()->status);
+            $this->assertSame('TRANSACTION_CONFLICT', PaymentReconciliationReview::sole()->reason);
             $after = $this->snapshot();
             unset($before['payments'], $after['payments']);
             $this->assertSame($before, $after);
@@ -335,6 +344,13 @@ class WompiWebhookPhaseSevenTest extends TestCase
         $this->assertSame($code, WebhookEvent::sole()->last_error);
         $this->assertFalse(WebhookEvent::sole()->metadata['retryable']);
         $this->assertSame($before, $this->snapshot());
+        $review = PaymentReconciliationReview::sole();
+        $this->assertSame($code, $review->reason);
+        $linked = in_array($case, ['payment_amount', 'payment_currency', 'order_currency', 'order_origin'], true);
+        $this->assertSame($linked ? $payment->id : null, $review->payment_id);
+        if ($linked) {
+            $this->assertSame($code, $payment->fresh()->reconciliation_reason);
+        }
         $this->postJson('/api/webhooks/wompi', $this->event())->assertOk();
         Http::assertSentCount(1);
     }
@@ -535,7 +551,13 @@ class WompiWebhookPhaseSevenTest extends TestCase
     {
         $snapshot = [];
         foreach (['payments', 'orders', 'inventory_stocks', 'inventory_movements', 'employee_commissions', 'order_status_histories'] as $table) {
-            $snapshot[$table] = DB::table($table)->orderBy('id')->get()->toJson();
+            $rows = DB::table($table)->orderBy('id')->get();
+            if ($table === 'payments') {
+                $rows->each(function ($payment): void {
+                    unset($payment->reconciliation_required_at, $payment->reconciliation_reason, $payment->updated_at);
+                });
+            }
+            $snapshot[$table] = $rows->toJson();
         }
 
         return $snapshot;

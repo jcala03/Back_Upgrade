@@ -18,6 +18,7 @@ class WompiWebhookService
         private readonly WompiClient $client,
         private readonly WompiPaymentTransitionService $transitions,
         private readonly WompiPaymentReconciliationService $reconciliation,
+        private readonly PaymentReconciliationResolutionService $reviews,
     ) {}
 
     /** Authenticated private verification precedes every normal financial transition. */
@@ -81,6 +82,7 @@ class WompiWebhookService
                 return ['status' => $ledger->status, 'http' => 200];
             }
             try {
+                $payment = null;
                 $transaction = $this->client->getTransaction($event['id']);
                 $payment = $this->match($event, $transaction);
                 if (! $transaction->supported()) {
@@ -120,6 +122,16 @@ class WompiWebhookService
                 $ledger->update(['status' => WebhookEvent::STATUS_FAILED, 'processed_at' => null, 'last_error' => $exception->errorCode,
                     'metadata' => ['environment' => $ledger->metadata['environment'], 'retryable' => $retryable]]);
 
+                if ($this->reviews->supportsReason($exception->errorCode)) {
+                    $reviewPayment = $exception->paymentId === null
+                        ? null
+                        : Payment::query()->find($exception->paymentId);
+                    $reviewOrder = $exception->orderId === null
+                        ? null
+                        : Order::query()->find($exception->orderId);
+                    $this->reviews->detect($exception->errorCode, $ledger, $reviewPayment, $reviewOrder);
+                }
+
                 // Permanent inconsistencies are explicitly audited, acknowledged, never applied.
                 return ['status' => 'failed', 'http' => $retryable ? $exception->httpStatus : 200];
             }
@@ -145,13 +157,13 @@ class WompiWebhookService
         }
         $amount = filter_var($payment->getRawOriginal('amount'), FILTER_VALIDATE_INT);
         if ($amount === false || $amount < 1 || $amount > intdiv(PHP_INT_MAX, 100) || $amount * 100 !== $transaction->amountInCents) {
-            throw new WompiWebhookException('WOMPI_AMOUNT_MISMATCH', 409);
+            throw new WompiWebhookException('WOMPI_AMOUNT_MISMATCH', 409, $payment->id, $order?->id);
         }
         if ($payment->currency !== $transaction->currency) {
-            throw new WompiWebhookException('WOMPI_CURRENCY_MISMATCH', 409);
+            throw new WompiWebhookException('WOMPI_CURRENCY_MISMATCH', 409, $payment->id, $order?->id);
         }
         if (! $order || $order->currency !== $transaction->currency || $order->origin !== Order::ORIGIN_ECOMMERCE) {
-            throw new WompiWebhookException('WOMPI_ORDER_MISMATCH', 409);
+            throw new WompiWebhookException('WOMPI_ORDER_MISMATCH', 409, $payment->id, $order?->id);
         }
 
         $payment->setRelation('order', $order);
@@ -161,7 +173,16 @@ class WompiWebhookService
 
     private function finish(WebhookEvent $ledger, Payment $payment): void
     {
-        $ledger->update(['status' => $payment->reconciliation_required_at !== null
+        $requiresReconciliation = $payment->reconciliation_required_at !== null;
+        if ($requiresReconciliation) {
+            $this->reviews->detect(
+                (string) $payment->reconciliation_reason,
+                $ledger,
+                $payment,
+                $payment->order,
+            );
+        }
+        $ledger->update(['status' => $requiresReconciliation
             ? WebhookEvent::STATUS_REQUIRES_RECONCILIATION : WebhookEvent::STATUS_PROCESSED,
             'processed_at' => now(), 'last_error' => null]);
     }

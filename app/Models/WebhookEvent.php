@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class WebhookEvent extends Model
 {
@@ -28,4 +29,9 @@ class WebhookEvent extends Model
         'processed_at' => 'datetime',
         'metadata' => 'array',
     ];
+
+    public function reconciliationReviews(): HasMany
+    {
+        return $this->hasMany(PaymentReconciliationReview::class);
+    }
 }

@@ -184,13 +184,84 @@ class OrderSalesPhaseOneTest extends TestCase
         $admin = $this->admin();
         $branch = $this->branch();
         $product = $this->product(price: 100000);
-        $this->seedStock($branch, $product, 4);
+        $stock = $this->seedStock($branch, $product, 4);
         $id = $this->postJson('/api/admin/orders', ['branch_id' => $branch->id, 'items' => [['product_id' => $product->id, 'quantity' => 2]], 'payment' => ['amount' => 50000, 'method' => 'cash']])->assertCreated()->json('data.id');
         $this->assertSame('partial', Order::find($id)->payment_status);
         $this->postJson("/api/admin/orders/{$id}/payments", ['amount' => 150000, 'method' => 'transfer'])->assertCreated();
-        $this->assertSame('paid', Order::find($id)->payment_status);
+        $order = Order::findOrFail($id);
+        $this->assertSame('paid', $order->payment_status);
+        $this->assertSame(Order::STATUS_CONFIRMED, $order->status);
+        $this->assertSame(2, $stock->fresh()->quantity);
+        $this->assertDatabaseCount('employee_commissions', 0);
         $this->assertDatabaseHas('payments', ['order_id' => $id, 'created_by' => $admin->id]);
         $this->postJson("/api/admin/orders/{$id}/payments", ['amount' => 1, 'method' => 'cash'])->assertUnprocessable();
+    }
+
+    public function test_manual_payment_state_matrix_allows_open_and_completed_sales_but_rejects_terminal_financial_states(): void
+    {
+        $this->admin();
+        $pending = $this->order(Order::STATUS_PENDING, Order::PAYMENT_UNPAID, 100000);
+
+        $this->postJson("/api/admin/orders/{$pending->id}/payments", [
+            'amount' => 40000,
+            'method' => 'cash',
+        ])->assertCreated()->assertJsonPath('order.status', Order::STATUS_PENDING)
+            ->assertJsonPath('order.payment_status', Order::PAYMENT_PARTIAL);
+        $this->postJson("/api/admin/orders/{$pending->id}/payments", [
+            'amount' => 60000,
+            'method' => 'transfer',
+        ])->assertCreated()->assertJsonPath('order.status', Order::STATUS_PENDING)
+            ->assertJsonPath('order.payment_status', Order::PAYMENT_PAID);
+        $this->postJson("/api/admin/orders/{$pending->id}/payments", [
+            'amount' => 1,
+            'method' => 'cash',
+        ])->assertUnprocessable()->assertJsonValidationErrors('amount');
+
+        $completed = $this->order(Order::STATUS_COMPLETED, Order::PAYMENT_UNPAID, 80000);
+        $this->postJson("/api/admin/orders/{$completed->id}/payments", [
+            'amount' => 80000,
+            'method' => 'card_terminal',
+        ])->assertCreated()->assertJsonPath('order.status', Order::STATUS_COMPLETED)
+            ->assertJsonPath('order.payment_status', Order::PAYMENT_PAID);
+
+        $cancelled = $this->order(Order::STATUS_CANCELLED, Order::PAYMENT_UNPAID, 50000);
+        $this->postJson("/api/admin/orders/{$cancelled->id}/payments", [
+            'amount' => 50000,
+            'method' => 'cash',
+        ])->assertUnprocessable()->assertJsonValidationErrors('order');
+
+        $refunded = $this->order(Order::STATUS_CONFIRMED, Order::PAYMENT_REFUNDED, 50000);
+        $this->postJson("/api/admin/orders/{$refunded->id}/payments", [
+            'amount' => 50000,
+            'method' => 'cash',
+        ])->assertUnprocessable()->assertJsonValidationErrors('order');
+
+        $this->assertSame(2, $pending->payments()->count());
+        $this->assertSame(1, $completed->payments()->count());
+        $this->assertSame(0, $cancelled->payments()->count());
+        $this->assertSame(0, $refunded->payments()->count());
+    }
+
+    public function test_manual_payment_rejects_invalid_amounts_and_revalidates_stale_repeated_requests(): void
+    {
+        $this->admin();
+        $order = $this->order(Order::STATUS_CONFIRMED, Order::PAYMENT_UNPAID, 100000);
+
+        foreach ([0, -1, 100001] as $amount) {
+            $this->postJson("/api/admin/orders/{$order->id}/payments", [
+                'amount' => $amount,
+                'method' => 'cash',
+            ])->assertUnprocessable()->assertJsonValidationErrors('amount');
+        }
+        $this->assertSame(0, $order->payments()->count());
+
+        $payload = ['amount' => 100000, 'method' => 'transfer', 'reference' => 'same-stale-submit'];
+        $this->postJson("/api/admin/orders/{$order->id}/payments", $payload)->assertCreated();
+        $this->postJson("/api/admin/orders/{$order->id}/payments", $payload)
+            ->assertUnprocessable()->assertJsonValidationErrors('amount');
+
+        $this->assertSame(1, $order->payments()->count());
+        $this->assertSame(Order::PAYMENT_PAID, $order->fresh()->payment_status);
     }
 
     public function test_authenticated_user_without_permissions_cannot_access_orders(): void
@@ -224,6 +295,19 @@ class OrderSalesPhaseOneTest extends TestCase
     private function product(int $price = 100000, int $cost = 40000, bool $active = true): Product
     {
         return Product::create(['name' => 'Producto '.uniqid(), 'slug' => 'producto-'.uniqid(), 'sku' => 'P-'.uniqid(), 'price' => $price, 'cost_price' => $cost, 'is_active' => $active, 'is_visible' => true]);
+    }
+
+    private function order(string $status, string $paymentStatus, int $total): Order
+    {
+        return Order::create([
+            'order_number' => 'PAY-'.uniqid(),
+            'origin' => Order::ORIGIN_CRM,
+            'subtotal' => $total,
+            'discount_total' => 0,
+            'total' => $total,
+            'status' => $status,
+            'payment_status' => $paymentStatus,
+        ]);
     }
 
     private function variant(Product $product, string $name, int $price, bool $default = false): ProductVariant

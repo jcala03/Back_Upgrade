@@ -81,6 +81,11 @@ class Order extends Model
         return $this->hasMany(Payment::class);
     }
 
+    public function reconciliationReviews(): HasMany
+    {
+        return $this->hasMany(PaymentReconciliationReview::class);
+    }
+
     public function canRetryPayment(): bool
     {
         return $this->origin === self::ORIGIN_ECOMMERCE
@@ -92,7 +97,9 @@ class Order extends Model
             && $this->stock_reservation_expires_at?->isFuture()
             && ! $this->payments()->where(function ($query) {
                 $query->where('status', Payment::STATUS_COMPLETED)
-                    ->orWhereNotNull('reconciliation_required_at');
+                    ->orWhereNotNull('reconciliation_required_at')
+                    ->orWhereHas('reconciliationReviews', fn ($reviews) => $reviews
+                        ->where('state', '!=', PaymentReconciliationReview::STATE_RESOLVED));
             })->exists();
     }
 

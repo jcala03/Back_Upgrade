@@ -46,12 +46,6 @@ class PaymentService
                     'branch_id' => 'La venta no tiene una sede asociada.',
                 ]);
             }
-            if ($lockedOrder->status === Order::STATUS_CANCELLED) {
-                throw ValidationException::withMessages([
-                    'order' => 'No puedes registrar pagos sobre una venta cancelada.',
-                ]);
-            }
-
             $lockedContext = $this->commercialContext->resolveForBranch(
                 $user,
                 (int) $lockedOrder->branch_id,
@@ -83,7 +77,31 @@ class PaymentService
         $completed = (int) $order->payments()
             ->where('status', Payment::STATUS_COMPLETED)
             ->sum('amount');
-        if ($status === Payment::STATUS_COMPLETED && $completed + (int) $data['amount'] > $order->total) {
+        $amount = filter_var($data['amount'] ?? null, FILTER_VALIDATE_INT);
+
+        if ($amount === false || $amount <= 0) {
+            throw ValidationException::withMessages([
+                'amount' => 'El monto del pago debe ser mayor a cero.',
+            ]);
+        }
+        if ($order->status === Order::STATUS_CANCELLED) {
+            throw ValidationException::withMessages([
+                'order' => 'No puedes registrar pagos sobre una venta cancelada.',
+            ]);
+        }
+        if ($order->payment_status === Order::PAYMENT_REFUNDED) {
+            throw ValidationException::withMessages([
+                'order' => 'No puedes registrar un pago normal sobre una venta reembolsada.',
+            ]);
+        }
+
+        $outstanding = max(0, (int) $order->total - $completed);
+        if ($order->payment_status === Order::PAYMENT_PAID || $outstanding === 0) {
+            throw ValidationException::withMessages([
+                'amount' => 'La orden ya no tiene saldo pendiente.',
+            ]);
+        }
+        if ($amount > $outstanding) {
             throw ValidationException::withMessages([
                 'amount' => 'El pago supera el saldo pendiente de la orden.',
             ]);
@@ -91,6 +109,7 @@ class PaymentService
 
         $payment = $order->payments()->create([
             ...$data,
+            'amount' => $amount,
             'status' => $status,
             'paid_at' => $status === Payment::STATUS_COMPLETED
                 ? ($data['paid_at'] ?? now())

@@ -30,6 +30,7 @@ use App\Http\Controllers\Api\MyQuotationController;
 use App\Http\Controllers\Api\MySaleController;
 use App\Http\Controllers\Api\MyTaskController;
 use App\Http\Controllers\Api\OrderController;
+use App\Http\Controllers\Api\PaymentReconciliationController;
 use App\Http\Controllers\Api\PersonalCommercialDiscoveryController;
 use App\Http\Controllers\Api\ProductBrandController;
 use App\Http\Controllers\Api\ProductCategoryController;
@@ -151,6 +152,11 @@ Route::middleware(['auth:sanctum', EnsureUserIsActive::class])->group(function (
 
         Route::get('/commissions', [CommissionController::class, 'index']);
         Route::get('/commissions/{commission}', [CommissionController::class, 'show']);
+
+        Route::get('/payment-reconciliations', [PaymentReconciliationController::class, 'index']);
+        Route::get('/payment-reconciliations/{review}', [PaymentReconciliationController::class, 'show']);
+        Route::post('/payment-reconciliations/{review}/start', [PaymentReconciliationController::class, 'start']);
+        Route::post('/payment-reconciliations/{review}/decisions', [PaymentReconciliationController::class, 'decision']);
 
         Route::get('/goals', [GoalController::class, 'index']);
         Route::post('/goals', [GoalController::class, 'store']);

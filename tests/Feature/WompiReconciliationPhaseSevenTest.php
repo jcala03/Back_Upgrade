@@ -10,12 +10,15 @@ use App\Models\InventoryItem;
 use App\Models\InventoryStock;
 use App\Models\Order;
 use App\Models\Payment;
+use App\Models\PaymentReconciliationAction;
+use App\Models\PaymentReconciliationReview;
 use App\Models\Product;
 use App\Models\User;
 use App\Models\UserCapability;
 use App\Models\WebhookEvent;
 use App\Services\EcommercePaymentService;
 use App\Services\OrderService;
+use App\Services\PaymentReconciliationResolutionService;
 use App\Services\PublicCheckoutService;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -91,6 +94,7 @@ class WompiReconciliationPhaseSevenTest extends TestCase
         $this->assertSame('tx-normal', $payment->transaction_id);
         $this->assertSame('LATE_APPROVAL', $payment->reconciliation_reason);
         $this->assertNotNull($payment->reconciliation_required_at);
+        $this->assertReview($payment, 'LATE_APPROVAL');
         $this->assertNull($payment->paid_at);
         $this->assertSame($orderBefore, $order->fresh()->getAttributes());
         $this->assertSame($before, $this->invariants($order));
@@ -120,6 +124,7 @@ class WompiReconciliationPhaseSevenTest extends TestCase
         $this->assertSame('pending', $second->fresh()->status);
         $this->assertSame('APPROVED', $second->fresh()->provider_status);
         $this->assertSame('tx-normal', $second->fresh()->transaction_id);
+        $this->assertReview($second, 'DUPLICATE_APPROVAL');
         $this->assertSame($beforeFirst, $first->fresh()->getAttributes());
         $this->assertSame($beforeOrder, $order->fresh()->getAttributes());
         $this->assertSame('paid', $order->fresh()->payment_status);
@@ -156,6 +161,7 @@ class WompiReconciliationPhaseSevenTest extends TestCase
         $this->assertSame('VOIDED', $payment->fresh()->provider_status);
         $this->assertSame('tx-normal', $payment->fresh()->transaction_id);
         $this->assertSame('VOID_AFTER_APPROVAL', $payment->fresh()->reconciliation_reason);
+        $this->assertReview($payment, 'VOID_AFTER_APPROVAL');
         $this->assertSame($paidAt, $payment->fresh()->paid_at->toIso8601String());
         $this->assertSame($expected, $order->fresh()->payment_status);
         $this->assertSame('confirmed', $order->fresh()->status);
@@ -190,6 +196,7 @@ class WompiReconciliationPhaseSevenTest extends TestCase
         $this->postJson('/api/webhooks/wompi', $event)->assertOk()->assertJsonPath('status', 'requires_reconciliation');
         $this->assertSame('TRANSACTION_CONFLICT', $payment->fresh()->reconciliation_reason);
         $this->assertNotNull($payment->fresh()->reconciliation_required_at);
+        $this->assertReview($payment, 'TRANSACTION_CONFLICT');
         $after = $payment->fresh()->getAttributes();
         foreach (['reconciliation_reason', 'reconciliation_required_at', 'updated_at'] as $key) {
             unset($beforePayment[$key], $after[$key]);
@@ -242,9 +249,11 @@ class WompiReconciliationPhaseSevenTest extends TestCase
         $this->travel(5)->minutes();
         $this->postJson('/api/webhooks/wompi', $event)->assertOk();
         $this->assertSame($timestamp, WebhookEvent::sole()->processed_at->toIso8601String());
+        $this->assertDatabaseCount('payment_reconciliation_reviews', 1);
         Http::assertSentCount(1);
         unset($event['data']['transaction']['currency']);
         $this->postJson('/api/webhooks/wompi', $event)->assertOk()->assertJsonPath('status', 'requires_reconciliation');
+        $this->assertDatabaseCount('payment_reconciliation_reviews', 2);
         Http::assertSentCount(2);
         $this->assertSame($before, [$payment->fresh()->getAttributes(), $order->fresh()->getAttributes(),
             CrmNotification::where('type', CrmNotification::TYPE_PAYMENT_RECONCILIATION_REQUIRED)->orderBy('user_id')->get()->toJson()]);
@@ -342,12 +351,72 @@ class WompiReconciliationPhaseSevenTest extends TestCase
         $this->assertNull($payment->fresh()->reconciliation_required_at);
         $this->assertNull($payment->fresh()->transaction_id);
         $this->assertDatabaseCount('crm_notifications', 0);
+        $review = PaymentReconciliationReview::sole();
+        $this->assertSame('WOMPI_EVENT_AMOUNT_IN_CENTS_MISMATCH', $review->reason);
+        $this->assertNull($review->payment_id);
+    }
+
+    public function test_resolved_review_stays_immutable_and_new_webhook_evidence_creates_successor(): void
+    {
+        [$payment, $order] = $this->fixture();
+        $order->update(['status' => 'cancelled']);
+        $event = $this->event($payment, 'APPROVED');
+        $newEvent = $event;
+        $newEvent['data']['transaction']['id'] = 'tx-new-evidence';
+        $newEvent['signature']['checksum'] = hash(
+            'sha256',
+            'tx-new-evidenceAPPROVED'.$newEvent['data']['transaction']['amount_in_cents'].'1790000000test_events_fixture',
+        );
+        Http::fake(['*' => Http::sequence()
+            ->push(['data' => $event['data']['transaction']])
+            ->push(['data' => $newEvent['data']['transaction']])]);
+        $this->postJson('/api/webhooks/wompi', $event)->assertOk()->assertJsonPath('status', 'requires_reconciliation');
+        $first = PaymentReconciliationReview::sole();
+        $admin = User::factory()->create(['role' => User::ROLE_ADMIN, 'is_active' => true]);
+        $resolutions = app(PaymentReconciliationResolutionService::class);
+        $resolutions->begin($first, $admin, 'start-first');
+        $resolutions->decide($first, $admin, 'resolve-first', [
+            'decision' => 'refund_confirmed_externally',
+            'justification' => 'External refund was verified safely.',
+            'evidence_reference' => 'case-first',
+        ]);
+        $history = $first->actions()->orderBy('id')->get()->toJson();
+        $this->assertNull($payment->fresh()->reconciliation_required_at);
+
+        $this->postJson('/api/webhooks/wompi', $event)->assertOk()->assertJsonPath('status', 'requires_reconciliation');
+        $this->assertDatabaseCount('payment_reconciliation_reviews', 1);
+        $this->assertNull($payment->fresh()->reconciliation_required_at);
+
+        $response = $this->postJson('/api/webhooks/wompi', $newEvent)->assertOk();
+        $this->assertSame(
+            'requires_reconciliation',
+            $response->json('status'),
+            (string) WebhookEvent::query()->latest('id')->value('last_error'),
+        );
+        $successor = PaymentReconciliationReview::query()->whereKeyNot($first->id)->sole();
+        $this->assertSame($first->id, $successor->parent_review_id);
+        $this->assertSame('TRANSACTION_CONFLICT', $successor->reason);
+        $this->assertSame('resolved', $first->fresh()->state);
+        $this->assertSame($history, $first->actions()->orderBy('id')->get()->toJson());
     }
 
     private function assertTerminal(): void
     {
         $this->assertSame('requires_reconciliation', WebhookEvent::sole()->status);
         $this->assertNotNull(WebhookEvent::sole()->processed_at);
+    }
+
+    private function assertReview(Payment $payment, string $reason): void
+    {
+        $review = PaymentReconciliationReview::sole();
+        $this->assertSame($payment->id, $review->payment_id);
+        $this->assertSame($payment->order_id, $review->order_id);
+        $this->assertSame(WebhookEvent::sole()->id, $review->webhook_event_id);
+        $this->assertSame($reason, $review->reason);
+        $this->assertSame('detected', $review->state);
+        $action = PaymentReconciliationAction::sole();
+        $this->assertSame('detected', $action->action);
+        $this->assertNull($action->actor_id);
     }
 
     private function assertRetryBlocked(string $token): void
