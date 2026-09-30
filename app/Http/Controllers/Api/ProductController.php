@@ -17,12 +17,16 @@ use App\Support\Catalog\PublicProductStockQuery;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use RuntimeException;
+use Throwable;
 
 class ProductController extends Controller
 {
@@ -82,35 +86,50 @@ class ProductController extends Controller
     public function store(Request $request): JsonResponse
     {
         $this->authorizePermission($request, 'products.create');
+        $imageUpload = $this->validateProductImageUpload($request);
         $payload = $this->normalizeIncomingRequest($request);
         $validated = $this->validateProductData($payload);
+        $storedImagePath = null;
 
-        $product = DB::transaction(function () use ($validated) {
-            $product = Product::create(
-                $this->buildProductData($validated)
-            );
+        try {
+            if ($imageUpload) {
+                $storedImagePath = $this->storeProductImage($imageUpload);
+                $validated['main_image'] = $storedImagePath;
+            }
 
-            $this->specValueService->sync(
-                $product,
-                $validated['technical_specs'] ?? []
-            );
+            $product = DB::transaction(function () use ($validated) {
+                $product = Product::create(
+                    $this->buildProductData($validated)
+                );
 
-            $compatibilities = $product->usesUniversalCompatibility()
-                ? []
-                : ($validated['vehicle_compatibilities'] ?? []);
+                $this->specValueService->sync(
+                    $product,
+                    $validated['technical_specs'] ?? []
+                );
 
-            $this->syncVehicleCompatibilities(
-                $product,
-                $compatibilities
-            );
+                $compatibilities = $product->usesUniversalCompatibility()
+                    ? []
+                    : ($validated['vehicle_compatibilities'] ?? []);
 
-            $this->syncVariants(
-                $product,
-                $validated['variants'] ?? []
-            );
+                $this->syncVehicleCompatibilities(
+                    $product,
+                    $compatibilities
+                );
 
-            return $product;
-        });
+                $this->syncVariants(
+                    $product,
+                    $validated['variants'] ?? []
+                );
+
+                return $product;
+            });
+        } catch (Throwable $exception) {
+            if ($storedImagePath) {
+                Storage::disk('public')->delete($storedImagePath);
+            }
+
+            throw $exception;
+        }
 
         $product = $product->fresh($this->adminRelations());
 
@@ -123,39 +142,54 @@ class ProductController extends Controller
     public function update(Request $request, Product $product): JsonResponse
     {
         $this->authorizePermission($request, 'products.update');
+        $imageUpload = $this->validateProductImageUpload($request);
         $payload = $this->normalizeIncomingRequest($request);
         $validated = $this->validateProductData($payload, $product);
+        $storedImagePath = null;
 
-        $product = DB::transaction(function () use ($product, $validated) {
-            $product->update(
-                $this->buildProductData($validated, $product)
-            );
-
-            if (array_key_exists('technical_specs', $validated)) {
-                $this->specValueService->sync(
-                    $product,
-                    $validated['technical_specs'] ?? []
-                );
+        try {
+            if ($imageUpload) {
+                $storedImagePath = $this->storeProductImage($imageUpload);
+                $validated['main_image'] = $storedImagePath;
             }
 
-            if ($product->usesUniversalCompatibility()) {
-                $this->syncVehicleCompatibilities($product, []);
-            } elseif (array_key_exists('vehicle_compatibilities', $validated)) {
-                $this->syncVehicleCompatibilities(
-                    $product,
-                    $validated['vehicle_compatibilities'] ?? []
+            $product = DB::transaction(function () use ($product, $validated) {
+                $product->update(
+                    $this->buildProductData($validated, $product)
                 );
+
+                if (array_key_exists('technical_specs', $validated)) {
+                    $this->specValueService->sync(
+                        $product,
+                        $validated['technical_specs'] ?? []
+                    );
+                }
+
+                if ($product->usesUniversalCompatibility()) {
+                    $this->syncVehicleCompatibilities($product, []);
+                } elseif (array_key_exists('vehicle_compatibilities', $validated)) {
+                    $this->syncVehicleCompatibilities(
+                        $product,
+                        $validated['vehicle_compatibilities'] ?? []
+                    );
+                }
+
+                if (array_key_exists('variants', $validated)) {
+                    $this->syncVariants(
+                        $product,
+                        $validated['variants'] ?? []
+                    );
+                }
+
+                return $product;
+            });
+        } catch (Throwable $exception) {
+            if ($storedImagePath) {
+                Storage::disk('public')->delete($storedImagePath);
             }
 
-            if (array_key_exists('variants', $validated)) {
-                $this->syncVariants(
-                    $product,
-                    $validated['variants'] ?? []
-                );
-            }
-
-            return $product;
-        });
+            throw $exception;
+        }
 
         $product = $product->fresh($this->adminRelations());
 
@@ -248,6 +282,12 @@ class ProductController extends Controller
     {
         $payload = $request->all();
 
+        foreach (['main_image', 'image'] as $field) {
+            if ($request->file($field) !== null) {
+                unset($payload[$field]);
+            }
+        }
+
         foreach (
             ['technical_specs', 'vehicle_compatibilities', 'variants'] as $field
         ) {
@@ -326,19 +366,62 @@ class ProductController extends Controller
             );
         }
 
-        if ($request->hasFile('main_image')) {
-            $payload['main_image'] = $request
-                ->file('main_image')
-                ->store('products', 'public');
-        }
-
-        if ($request->hasFile('image')) {
-            $payload['main_image'] = $request
-                ->file('image')
-                ->store('products', 'public');
-        }
-
         return $payload;
+    }
+
+    private function validateProductImageUpload(Request $request): ?UploadedFile
+    {
+        $uploads = collect(['main_image', 'image'])
+            ->mapWithKeys(fn (string $field): array => [
+                $field => $request->file($field),
+            ])
+            ->filter(fn ($file): bool => $file !== null);
+
+        if ($uploads->count() > 1) {
+            throw ValidationException::withMessages([
+                'main_image' => 'Envía una sola imagen principal.',
+            ]);
+        }
+
+        if ($uploads->isEmpty()) {
+            return null;
+        }
+
+        $field = (string) $uploads->keys()->first();
+        $upload = $uploads->first();
+
+        Validator::make(
+            [$field => $upload],
+            [
+                $field => [
+                    'bail',
+                    'required',
+                    'file',
+                    'image',
+                    'mimetypes:image/jpeg,image/png,image/webp',
+                    'extensions:jpg,jpeg,png,webp',
+                    'max:5120',
+                ],
+            ],
+            [
+                "{$field}.mimetypes" => 'La imagen debe ser JPEG, PNG o WebP.',
+                "{$field}.extensions" => 'La extensión debe ser jpg, jpeg, png o webp.',
+                "{$field}.max" => 'La imagen no puede superar 5 MB.',
+            ]
+        )->validate();
+
+        return $upload;
+    }
+
+    private function storeProductImage(UploadedFile $image): string
+    {
+        $path = $image->store('products', 'public');
+
+        if (! is_string($path) || $path === '') {
+            throw new RuntimeException('The product image could not be stored.');
+        }
+
+        return $path;
     }
 
     private function validateProductData(

@@ -11,9 +11,13 @@ class DatabaseSeeder extends Seeder
 
     public function run(): void
     {
-        $this->call([
-            UserSeeder::class,
-            BranchSeeder::class,
-        ]);
+        $this->call(BranchSeeder::class);
+
+        if (UserSeeder::shouldRun(
+            app()->environment(),
+            (bool) config('seeding.demo_users.enabled')
+        )) {
+            $this->call(UserSeeder::class);
+        }
     }
 }
