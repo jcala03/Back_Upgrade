@@ -45,7 +45,7 @@ class ProductArchitecturePhaseOneTest extends TestCase
 
     public function test_legacy_product_without_variants_still_creates(): void
     {
-        $this->postJson('/api/admin/products', ['name' => 'Accesorio universal'])
+        $this->postJson('/api/admin/products', ['name' => 'Accesorio universal', 'is_visible' => false])
             ->assertCreated()
             ->assertJsonPath('data.name', 'Accesorio universal');
     }
@@ -56,6 +56,7 @@ class ProductArchitecturePhaseOneTest extends TestCase
 
         $this->postJson('/api/admin/products', [
             'name' => 'Pieza legacy',
+            'is_visible' => false,
             'compatibility_type' => 'vehicle_specific',
             'vehicle_compatibilities' => [['vehicle_brand_id' => $brand->id]],
         ])->assertCreated()->assertJsonCount(1, 'data.vehicle_compatibilities');
@@ -295,6 +296,7 @@ class ProductArchitecturePhaseOneTest extends TestCase
         return $this->postJson('/api/admin/products', array_replace([
             'name' => 'Producto '.fake()->unique()->word(),
             'variants' => [$this->variantPayload()],
+            'is_visible' => false,
         ], $overrides));
     }
 

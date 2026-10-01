@@ -121,6 +121,7 @@ class EcommerceShippingFoundationPhaseOneTest extends TestCase
 
         $response = $this->postJson('/api/admin/products', [
             'name' => 'Pantalla logística',
+            'is_visible' => false,
             'compatibility_type' => Product::COMPATIBILITY_TYPE_UNIVERSAL,
             'requires_shipping' => true,
             'weight_grams' => 2500,

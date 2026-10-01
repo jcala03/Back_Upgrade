@@ -103,6 +103,25 @@ class Order extends Model
             })->exists();
     }
 
+    public function publicPaymentAttemptStatus(): ?string
+    {
+        $payment = $this->payments()->where('method', Payment::METHOD_WOMPI)->latest('id')->first();
+        if (! $payment) {
+            return null;
+        }
+        if ($payment->reconciliation_required_at !== null || $payment->reconciliationReviews()->where('state', '!=', PaymentReconciliationReview::STATE_RESOLVED)->exists()) {
+            return 'UNKNOWN';
+        }
+
+        return match ($payment->status) {
+            Payment::STATUS_COMPLETED => 'APPROVED',
+            Payment::STATUS_REFUNDED => 'VOIDED',
+            Payment::STATUS_PENDING => 'PENDING',
+            Payment::STATUS_FAILED => in_array($payment->provider_status, ['DECLINED', 'ERROR', 'VOIDED'], true) ? $payment->provider_status : 'UNKNOWN',
+            default => 'UNKNOWN',
+        };
+    }
+
     public function charges(): HasMany
     {
         return $this->hasMany(OrderCharge::class);

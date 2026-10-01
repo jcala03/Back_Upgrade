@@ -60,6 +60,7 @@ class AdminProductResource extends JsonResource
                 : [],
             'main_image' => $product->main_image,
             'image_url' => $product->image_url,
+            'images' => ProductImageResource::collection($this->whenLoaded('images')),
             'is_visible' => $product->is_visible,
             'is_featured' => $product->is_featured,
             'is_active' => $product->is_active,

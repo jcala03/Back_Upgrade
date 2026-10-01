@@ -61,6 +61,7 @@ class ProductCommissionConfigurationPhaseFourTest extends TestCase
     {
         $response = $this->postJson('/api/admin/products', [
             'name' => 'Producto sin comisión',
+            'is_visible' => false,
         ])->assertCreated()
             ->assertJsonStructure([
                 'data' => ['commission_enabled', 'commission_amount'],
@@ -79,6 +80,7 @@ class ProductCommissionConfigurationPhaseFourTest extends TestCase
     {
         $response = $this->postJson('/api/admin/products', [
             'name' => 'Pantalla comisionable',
+            'is_visible' => false,
             'commission_enabled' => true,
             'commission_amount' => 50000,
         ])->assertCreated()
@@ -120,6 +122,7 @@ class ProductCommissionConfigurationPhaseFourTest extends TestCase
     {
         $response = $this->postJson('/api/admin/products', [
             'name' => 'Configuración deshabilitada',
+            'is_visible' => false,
             'commission_enabled' => false,
             'commission_amount' => 50000,
         ])->assertCreated()
@@ -243,6 +246,7 @@ class ProductCommissionConfigurationPhaseFourTest extends TestCase
             'price' => 100000,
             'is_active' => true,
             'is_visible' => true,
+            'main_image' => 'qa-ux/commission-fixture.png',
         ], $overrides));
     }
 }

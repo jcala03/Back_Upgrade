@@ -85,6 +85,11 @@ class Product extends Model
         'is_active' => 'boolean',
     ];
 
+    public function images(): HasMany
+    {
+        return $this->hasMany(ProductImage::class)->orderBy('sort_order')->orderBy('id');
+    }
+
     protected $hidden = [
         'commission_enabled',
         'commission_amount',

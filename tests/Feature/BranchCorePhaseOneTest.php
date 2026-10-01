@@ -363,6 +363,7 @@ class BranchCorePhaseOneTest extends TestCase
 
     public function test_employee_with_future_active_appointment_cannot_move_branches_silently(): void
     {
+        $startsAt = now()->addDay()->startOfDay()->addHours(14);
         $from = $this->branch();
         $to = $this->branch(['code' => 'BOG', 'slug' => 'bogota', 'name' => 'Bogotá', 'city' => 'Bogotá']);
         $this->actingAsRole(User::ROLE_ADMIN);
@@ -378,8 +379,8 @@ class BranchCorePhaseOneTest extends TestCase
             'title' => 'Cita futura',
             'contact_name' => 'Cliente',
             'contact_phone' => '3000000000',
-            'starts_at' => '2026-10-01 14:00:00',
-            'ends_at' => '2026-10-01 15:00:00',
+            'starts_at' => $startsAt,
+            'ends_at' => $startsAt->copy()->addHour(),
         ]);
 
         $this->patchJson("/api/admin/employees/{$employeeId}", ['branch_id' => $to->id])
@@ -392,6 +393,7 @@ class BranchCorePhaseOneTest extends TestCase
 
     public function test_employee_with_future_active_scheduled_task_cannot_move_branches_silently(): void
     {
+        $startsAt = now()->addDay()->startOfDay()->addHours(14);
         $from = $this->branch();
         $to = $this->branch(['code' => 'BOG', 'slug' => 'bogota', 'name' => 'Bogotá', 'city' => 'Bogotá']);
         $this->actingAsRole(User::ROLE_ADMIN);
@@ -405,8 +407,8 @@ class BranchCorePhaseOneTest extends TestCase
             'title' => 'Tarea futura',
             'priority' => Task::PRIORITY_NORMAL,
             'status' => Task::STATUS_PENDING,
-            'scheduled_starts_at' => '2026-10-01 14:00:00',
-            'scheduled_ends_at' => '2026-10-01 15:00:00',
+            'scheduled_starts_at' => $startsAt,
+            'scheduled_ends_at' => $startsAt->copy()->addHour(),
         ]);
 
         $this->patchJson("/api/admin/employees/{$employeeId}", ['branch_id' => $to->id])

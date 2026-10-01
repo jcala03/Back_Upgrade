@@ -9,6 +9,7 @@ use App\Models\Product;
 use App\Models\ProductVariant;
 use App\Models\VehicleModel;
 use App\Models\VehicleVersion;
+use App\Services\ProductImageService;
 use App\Services\ProductPricingService;
 use App\Services\ProductSpecValueService;
 use App\Services\ProductVariantCompatibilityService;
@@ -20,7 +21,6 @@ use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -35,6 +35,7 @@ class ProductController extends Controller
         private readonly ProductSpecValueService $specValueService,
         private readonly ProductVariantSpecValueService $variantSpecValueService,
         private readonly ProductVariantCompatibilityService $variantCompatibilityService,
+        private readonly ProductImageService $imageService,
     ) {}
 
     public function index(Request $request): JsonResponse
@@ -87,20 +88,29 @@ class ProductController extends Controller
     {
         $this->authorizePermission($request, 'products.create');
         $imageUpload = $this->validateProductImageUpload($request);
+        $galleryUploads = $this->imageService->validateUploads($request);
         $payload = $this->normalizeIncomingRequest($request);
+        if (! empty($payload['main_image'])) {
+            throw ValidationException::withMessages(['main_image' => 'Sube un archivo de imagen; no se aceptan rutas nuevas.']);
+        }
         $validated = $this->validateProductData($payload);
         $storedImagePath = null;
+        $galleryPaths = [];
 
         try {
             if ($imageUpload) {
                 $storedImagePath = $this->storeProductImage($imageUpload);
-                $validated['main_image'] = $storedImagePath;
             }
 
-            $product = DB::transaction(function () use ($validated) {
+            foreach ($galleryUploads as $file) {
+                $galleryPaths[] = $this->storeProductImage($file);
+            }
+
+            $product = DB::transaction(function () use ($validated, $request, $galleryPaths, $storedImagePath) {
                 $product = Product::create(
                     $this->buildProductData($validated)
                 );
+                $this->imageService->sync($product, $request, $galleryPaths, $storedImagePath);
 
                 $this->specValueService->sync(
                     $product,
@@ -124,9 +134,7 @@ class ProductController extends Controller
                 return $product;
             });
         } catch (Throwable $exception) {
-            if ($storedImagePath) {
-                Storage::disk('public')->delete($storedImagePath);
-            }
+            $this->imageService->cleanup(array_filter([$storedImagePath, ...$galleryPaths]));
 
             throw $exception;
         }
@@ -143,20 +151,28 @@ class ProductController extends Controller
     {
         $this->authorizePermission($request, 'products.update');
         $imageUpload = $this->validateProductImageUpload($request);
+        $galleryUploads = $this->imageService->validateUploads($request);
         $payload = $this->normalizeIncomingRequest($request);
         $validated = $this->validateProductData($payload, $product);
+        unset($validated['main_image']);
         $storedImagePath = null;
+        $galleryPaths = [];
 
         try {
             if ($imageUpload) {
                 $storedImagePath = $this->storeProductImage($imageUpload);
-                $validated['main_image'] = $storedImagePath;
             }
 
-            $product = DB::transaction(function () use ($product, $validated) {
+            foreach ($galleryUploads as $file) {
+                $galleryPaths[] = $this->storeProductImage($file);
+            }
+
+            $product = DB::transaction(function () use ($product, $validated, $request, $galleryPaths, $storedImagePath) {
+                $product = Product::whereKey($product->id)->lockForUpdate()->firstOrFail();
                 $product->update(
                     $this->buildProductData($validated, $product)
                 );
+                $this->imageService->sync($product, $request, $galleryPaths, $storedImagePath);
 
                 if (array_key_exists('technical_specs', $validated)) {
                     $this->specValueService->sync(
@@ -184,9 +200,7 @@ class ProductController extends Controller
                 return $product;
             });
         } catch (Throwable $exception) {
-            if ($storedImagePath) {
-                Storage::disk('public')->delete($storedImagePath);
-            }
+            $this->imageService->cleanup(array_filter([$storedImagePath, ...$galleryPaths]));
 
             throw $exception;
         }
@@ -217,7 +231,9 @@ class ProductController extends Controller
             ], 409);
         }
 
+        $paths = $product->images()->pluck('path')->all();
         $product->delete();
+        $this->imageService->cleanup($paths);
 
         return response()->json([
             'message' => 'Artículo eliminado correctamente.',
@@ -227,6 +243,7 @@ class ProductController extends Controller
     private function publicRelations(): array
     {
         return [
+            'images',
             'productCategory.fields',
             'productBrand',
             'specValues.field',
@@ -262,6 +279,7 @@ class ProductController extends Controller
     private function adminRelations(): array
     {
         return [
+            'images',
             'productCategory.fields',
             'productBrand',
             'specValues.field',
@@ -984,6 +1002,11 @@ class ProductController extends Controller
                     ]);
                 }
 
+                foreach (['main_image', 'weight_grams', 'length_mm', 'width_mm', 'height_mm', 'country_of_origin', 'hs_code', 'customs_description'] as $field) {
+                    if (! array_key_exists($field, $variantData)) {
+                        unset($payload[$field]);
+                    }
+                }
                 $variant->update($payload);
 
                 $this->syncVariantDetails($variant, $variantData);

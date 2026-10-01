@@ -35,6 +35,7 @@ class PublicProductResource extends JsonResource
             'is_featured' => $product->is_featured,
             'is_active' => $product->is_active,
             'image_url' => $product->image_url,
+            'images' => ProductImageResource::collection($this->whenLoaded('images')),
             'stock_status' => PublicProductStockQuery::stockStatus($stock, $minimum),
             'is_low_stock' => PublicProductStockQuery::isLowStock($stock, $minimum),
             'has_variants' => $product->has_variants,

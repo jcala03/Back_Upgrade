@@ -31,6 +31,7 @@ class PublicOrderResource extends JsonResource
             'order_status' => $order->status,
             'stock_reservation_expires_at' => $order->stock_reservation_expires_at?->toIso8601String(),
             'can_retry_payment' => $order->canRetryPayment(),
+            'payment_attempt_status' => $order->publicPaymentAttemptStatus(),
             'status' => $order->status,
             'payment_status' => $order->payment_status,
             'fulfillment_type' => $order->fulfillment_type,

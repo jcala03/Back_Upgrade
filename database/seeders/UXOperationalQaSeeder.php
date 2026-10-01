@@ -23,7 +23,9 @@ use App\Models\VehicleBrand;
 use App\Models\VehicleModel;
 use App\Models\VehicleMultimediaSystem;
 use App\Models\VehicleVersion;
+use App\Services\ProductImageService;
 use Illuminate\Database\Seeder;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
@@ -533,6 +535,11 @@ class UXOperationalQaSeeder extends Seeder
                 'is_active' => true,
             ],
         );
+
+        foreach ([$simple, $variantProduct, $outOfStock] as $product) {
+            $lockedProduct = Product::whereKey($product->id)->lockForUpdate()->firstOrFail();
+            app(ProductImageService::class)->sync($lockedProduct, new Request, [], null);
+        }
 
         return [
             'simple' => $simple,
