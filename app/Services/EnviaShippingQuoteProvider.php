@@ -27,6 +27,7 @@ class EnviaShippingQuoteProvider implements ShippingQuoteProvider
     public function quote(ShippingQuoteRequest $request): array
     {
         $this->assertConfigured();
+
         $identity = $this->businessSettings->identity();
         if (blank($identity['business_name'] ?? null) || blank($identity['phone'] ?? null)) {
             throw new EcommerceShippingException(
@@ -40,29 +41,64 @@ class EnviaShippingQuoteProvider implements ShippingQuoteProvider
             $request->origin->state,
             $request->origin->city,
         );
+
         $destinationLocation = $this->locations->resolve(
             $request->destination->countryCode,
             $request->destination->state,
             $request->destination->city,
         );
+
         $international = $request->origin->countryCode !== $request->destination->countryCode;
         $carriers = $this->carriers($request->origin->countryCode, $international);
-        $payload = $this->basePayload($request, $identity, $originLocation, $destinationLocation, $international);
+
+        $payload = $this->basePayload(
+            $request,
+            $identity,
+            $originLocation,
+            $destinationLocation,
+            $international,
+        );
+
         $quotes = [];
         $hasMalformedRates = false;
+        $hasUnavailableRates = false;
 
         foreach ($carriers as $carrier) {
             try {
-                $response = $this->client()->post($this->shippingUrl('/ship/rate/'), [
-                    ...$payload,
-                    'shipment' => ['type' => 1, 'carrier' => $carrier],
-                ]);
+                $response = $this->client()->post(
+                    $this->shippingUrl('/ship/rate/'),
+                    [
+                        ...$payload,
+                        'shipment' => [
+                            'type' => 1,
+                            'carrier' => $carrier,
+                        ],
+                    ],
+                );
+
+                $this->assertResponse($response, 'rate');
             } catch (ConnectionException) {
-                $this->unavailable('rate');
+                $hasUnavailableRates = true;
+
+                continue;
+            } catch (EcommerceShippingException $exception) {
+                if ($exception->errorCode !== EcommerceShippingException::PROVIDER_UNAVAILABLE) {
+                    throw $exception;
+                }
+
+                $hasUnavailableRates = true;
+
+                continue;
             }
 
-            $this->assertResponse($response, 'rate');
+            if ($this->hasEmbeddedProviderError($response)) {
+                $hasUnavailableRates = true;
+
+                continue;
+            }
+
             $rates = $response->json('data');
+
             if (! is_array($rates)) {
                 $hasMalformedRates = true;
 
@@ -70,7 +106,10 @@ class EnviaShippingQuoteProvider implements ShippingQuoteProvider
             }
 
             foreach ($rates as $rate) {
-                $normalized = is_array($rate) ? $this->normalize($rate, $request) : null;
+                $normalized = is_array($rate)
+                    ? $this->normalize($rate, $request)
+                    : null;
+
                 if ($normalized) {
                     $quotes[] = $normalized;
                 } else {
@@ -79,21 +118,38 @@ class EnviaShippingQuoteProvider implements ShippingQuoteProvider
             }
         }
 
-        if ($quotes === [] && $hasMalformedRates) {
+        if ($quotes !== []) {
+            usort(
+                $quotes,
+                static fn (ShippingQuoteResult $a, ShippingQuoteResult $b): int => $a->amount <=> $b->amount,
+            );
+
+            return $quotes;
+        }
+
+        if ($hasMalformedRates) {
             throw new EcommerceShippingException(
                 EcommerceShippingException::MALFORMED_PROVIDER_RESPONSE,
                 'Envia devolvió tarifas con una estructura inválida.',
                 ['operation' => 'rate'],
             );
         }
-        if ($quotes === []) {
-            throw new EcommerceShippingException(
-                EcommerceShippingException::NO_QUOTES_AVAILABLE,
-                'Envia no devolvió tarifas para la ruta solicitada.',
-            );
+
+        if ($hasUnavailableRates) {
+            $this->unavailable('rate');
         }
 
-        return $quotes;
+        throw new EcommerceShippingException(
+            EcommerceShippingException::NO_QUOTES_AVAILABLE,
+            'Envia no devolvió tarifas para la ruta solicitada.',
+        );
+    }
+
+    private function hasEmbeddedProviderError(Response $response): bool
+    {
+        $code = $response->json('code');
+
+        return is_numeric($code) && (int) $code >= 400;
     }
 
     private function basePayload(

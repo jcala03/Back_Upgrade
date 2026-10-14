@@ -216,6 +216,163 @@ class EnviaShippingQuoteProviderTest extends TestCase
         $this->assertShippingError(EcommerceShippingException::NO_QUOTES_AVAILABLE, fn () => $this->provider()->quote($this->domesticRequest()));
     }
 
+    public function test_partial_carrier_failures_are_ignored_and_valid_rates_are_sorted_cheapest_first(): void
+    {
+        Config::set('services.envia.retries', 2);
+        $calls = [];
+        $this->fakeSuccessfulTransport(function (Request $request) use (&$calls) {
+            $carrier = $request->data()['shipment']['carrier'];
+            $calls[] = $carrier;
+
+            return match ($carrier) {
+                'fedex' => Http::response($this->rateResponse('fedex', 'standard', 5610)),
+                'redServi' => Http::response(['code' => 500, 'description' => 'Internal error', 'message' => 'Carrier unavailable']),
+                'saferbo' => Http::failedConnection('Simulated carrier timeout')($request),
+                'coordinadora' => Http::response($this->rateResponse('coordinadora', 'standard', 8000)),
+            };
+        }, ['coordinadora', 'redServi', 'saferbo', 'fedex']);
+
+        $quotes = $this->provider()->quote($this->domesticRequest());
+
+        $this->assertCount(2, $quotes);
+        $this->assertSame(['fedex', 'coordinadora'], array_column($quotes, 'carrier'));
+        $this->assertSame([5610, 8000], array_column($quotes, 'amount'));
+        $this->assertSame(2, count(array_filter($calls, fn ($carrier) => $carrier === 'saferbo')));
+        $this->assertSame('fedex', $calls[array_key_last($calls)]);
+    }
+
+    public function test_embedded_provider_rate_error_maps_to_provider_unavailable_when_no_carrier_succeeds(): void
+    {
+        $code = 500;
+        $this->fakeSuccessfulTransport(function () use (&$code) {
+            return Http::response([
+                'code' => $code,
+                'description' => 'Internal error',
+                'message' => 'Carrier unavailable '.self::TOKEN,
+            ]);
+        }, ['redServi']);
+
+        foreach ([500, '500', 400] as $code) {
+
+            $exception = $this->captureShippingError(fn () => $this->provider()->quote($this->domesticRequest()));
+
+            $this->assertSame(EcommerceShippingException::PROVIDER_UNAVAILABLE, $exception->errorCode);
+            $this->assertSame(['operation' => 'rate'], $exception->context);
+            $this->assertStringNotContainsString(self::TOKEN, $exception->getMessage());
+            $this->assertStringNotContainsString(self::TOKEN, json_encode($exception->context, JSON_THROW_ON_ERROR));
+            $this->assertStringNotContainsString('Internal error', $exception->getMessage());
+        }
+    }
+
+    public function test_international_partial_failures_keep_all_envia_transport_rates_sorted_without_a_brand_preference(): void
+    {
+        $this->fakeSuccessfulTransport(fn (Request $request) => match ($request->data()['shipment']['carrier']) {
+            'fedex' => Http::response($this->rateResponse('fedex', 'express', 145000)),
+            'unavailable' => Http::response(['message' => 'Unavailable'], 503),
+            'dhl' => Http::response(['data' => [
+                $this->rate('dhl', 'express', 135000),
+                $this->rate('dhl', 'economy', 100000),
+            ]]),
+        }, ['fedex', 'unavailable', 'dhl']);
+
+        $quotes = $this->provider()->quote($this->internationalRequest());
+
+        $this->assertCount(3, $quotes);
+        $this->assertSame([100000, 135000, 145000], array_column($quotes, 'amount'));
+        $this->assertSame(['dhl', 'dhl', 'fedex'], array_column($quotes, 'carrier'));
+        $this->assertSame(['envia', 'envia', 'envia'], array_column($quotes, 'provider'));
+        Http::assertNotSent(fn (Request $request) => str_contains($request->url(), '/landed-cost'));
+    }
+
+    public function test_valid_rate_survives_malformed_and_unavailable_carriers(): void
+    {
+        $this->fakeSuccessfulTransport(fn (Request $request) => match ($request->data()['shipment']['carrier']) {
+            'unavailable' => Http::response([], 503),
+            'malformed' => Http::response(['data' => [['carrier' => 'malformed']]]),
+            'coordinadora' => Http::response($this->rateResponse('coordinadora', 'standard', 4000)),
+            'fedex' => Http::response($this->rateResponse('fedex', 'standard', 5610)),
+        }, ['unavailable', 'malformed', 'fedex', 'coordinadora']);
+
+        $quotes = $this->provider()->quote($this->domesticRequest());
+
+        $this->assertSame(['coordinadora', 'fedex'], array_column($quotes, 'carrier'));
+        $this->assertSame([4000, 5610], array_column($quotes, 'amount'));
+    }
+
+    public function test_all_unavailable_rate_carriers_map_to_provider_unavailable(): void
+    {
+        $this->fakeSuccessfulTransport(fn (Request $request) => match ($request->data()['shipment']['carrier']) {
+            'connection' => Http::failedConnection('Simulated carrier timeout')($request),
+            'server' => Http::response(['message' => self::TOKEN], 503),
+            'embedded' => Http::response(['code' => 500, 'message' => self::TOKEN]),
+        }, ['connection', 'server', 'embedded']);
+
+        $exception = $this->captureShippingError(fn () => $this->provider()->quote($this->domesticRequest()));
+
+        $this->assertSame(EcommerceShippingException::PROVIDER_UNAVAILABLE, $exception->errorCode);
+        $this->assertStringNotContainsString(self::TOKEN, $exception->getMessage());
+        $this->assertStringNotContainsString(self::TOKEN, json_encode($exception->context, JSON_THROW_ON_ERROR));
+    }
+
+    public function test_malformed_rates_take_precedence_over_unavailability_when_no_rate_is_valid(): void
+    {
+        $this->fakeSuccessfulTransport(fn (Request $request) => $request->data()['shipment']['carrier'] === 'malformed'
+            ? Http::response(['unexpected' => []])
+            : Http::response([], 503), ['unavailable', 'malformed']);
+
+        $this->assertShippingError(EcommerceShippingException::MALFORMED_PROVIDER_RESPONSE, fn () => $this->provider()->quote($this->domesticRequest()));
+    }
+
+    public function test_successful_empty_rates_from_all_carriers_map_to_no_quotes_available(): void
+    {
+        $this->fakeSuccessfulTransport(fn () => Http::response(['data' => []]), ['fedex', 'coordinadora']);
+
+        $this->assertShippingError(EcommerceShippingException::NO_QUOTES_AVAILABLE, fn () => $this->provider()->quote($this->domesticRequest()));
+    }
+
+    public function test_empty_rates_and_an_unavailable_carrier_map_to_provider_unavailable(): void
+    {
+        $this->fakeSuccessfulTransport(fn (Request $request) => $request->data()['shipment']['carrier'] === 'empty'
+            ? Http::response(['data' => []])
+            : Http::response(['code' => 500]), ['empty', 'unavailable']);
+
+        $this->assertShippingError(EcommerceShippingException::PROVIDER_UNAVAILABLE, fn () => $this->provider()->quote($this->domesticRequest()));
+    }
+
+    public function test_rate_authentication_errors_are_not_ignored_even_after_a_valid_rate(): void
+    {
+        $status = 401;
+        $this->fakeSuccessfulTransport(function (Request $request) use (&$status) {
+            return $request->data()['shipment']['carrier'] === 'fedex'
+                ? Http::response($this->rateResponse('fedex', 'standard', 5610))
+                : Http::response(['message' => self::TOKEN], $status);
+        }, ['fedex', 'authentication']);
+
+        foreach ([401, 403] as $status) {
+
+            $exception = $this->captureShippingError(fn () => $this->provider()->quote($this->domesticRequest()));
+
+            $this->assertSame(EcommerceShippingException::PROVIDER_AUTHENTICATION_FAILED, $exception->errorCode);
+            $this->assertSame(['operation' => 'rate', 'status' => $status], $exception->context);
+            $this->assertStringNotContainsString(self::TOKEN, $exception->getMessage());
+            $this->assertStringNotContainsString(self::TOKEN, json_encode($exception->context, JSON_THROW_ON_ERROR));
+        }
+    }
+
+    public function test_rate_422_is_not_ignored_even_after_a_valid_rate(): void
+    {
+        $this->fakeSuccessfulTransport(fn (Request $request) => $request->data()['shipment']['carrier'] === 'fedex'
+            ? Http::response($this->rateResponse('fedex', 'standard', 5610))
+            : Http::response(['message' => self::TOKEN], 422), ['fedex', 'invalid_address']);
+
+        $exception = $this->captureShippingError(fn () => $this->provider()->quote($this->domesticRequest()));
+
+        $this->assertSame(EcommerceShippingException::INVALID_ADDRESS, $exception->errorCode);
+        $this->assertSame(['operation' => 'rate', 'status' => 422], $exception->context);
+        $this->assertStringNotContainsString(self::TOKEN, $exception->getMessage());
+        $this->assertStringNotContainsString(self::TOKEN, json_encode($exception->context, JSON_THROW_ON_ERROR));
+    }
+
     public function test_invalid_rate_items_map_to_malformed_provider_response(): void
     {
         $this->fakeSuccessfulTransport(fn () => Http::response(['meta' => 'rate', 'data' => [['carrier' => 'dhl']]]), ['dhl']);
