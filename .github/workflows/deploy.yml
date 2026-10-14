@@ -6,40 +6,76 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
+    name: Deploy to Hostinger
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy to Hostinger
+      - name: Deploy backend
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: 212.85.29.152
           username: u497825029
           password: ${{ secrets.HOSTINGER_PASSWORD }}
           port: 65002
-          command_timeout: 10m
+          command_timeout: 15m
           script: |
             set -e
 
-            PROJECT_DIR="$HOME/domains/crmupgradecol.com/laravel"
+            PROJECT=/home/u497825029/domains/crmupgradecol.com/laravel
+            PUBLIC=/home/u497825029/domains/crmupgradecol.com/public_html
 
-            if [ ! -d "$PROJECT_DIR/.git" ]; then
-              echo "ERROR: Laravel no está instalado."
-              echo "Primero debemos clonar el repositorio."
-              exit 1
-            fi
+            echo "== Verificando instalación =="
+            test -f "$PROJECT/.env"
+            test -f "$PROJECT/artisan"
+            test -f "$PUBLIC/index.php"
 
-            cd "$PROJECT_DIR"
+            cd "$PROJECT"
 
+            echo "== Actualizando código =="
             git pull --ff-only origin main
 
-            composer2 install --no-dev --optimize-autoloader --no-interaction
+            echo "== Instalando dependencias =="
+            composer2 install \
+              --no-dev \
+              --optimize-autoloader \
+              --no-interaction \
+              --no-scripts
 
+            echo "== Registrando paquetes =="
+            php artisan package:discover
+
+            echo "== Limpiando caché =="
             php artisan optimize:clear
 
-            php artisan migrate:status
-
+            echo "== Ejecutando migraciones =="
             php artisan migrate --force
 
-            php artisan optimize
+            echo "== Actualizando archivos públicos =="
+            cp -a public/. "$PUBLIC/"
+
+            echo "== Restaurando index.php de Hostinger =="
+            sed -i \
+              "s|__DIR__.'/../storage/|__DIR__.'/../laravel/storage/|g; \
+               s|__DIR__.'/../vendor/|__DIR__.'/../laravel/vendor/|g; \
+               s|__DIR__.'/../bootstrap/|__DIR__.'/../laravel/bootstrap/|g" \
+              "$PUBLIC/index.php"
+
+            echo "== Verificando sintaxis =="
+            php -l "$PUBLIC/index.php"
+
+            echo "== Verificando enlace storage =="
+            if [ ! -e "$PUBLIC/storage" ] && [ ! -L "$PUBLIC/storage" ]; then
+              ln -s ../laravel/storage/app/public "$PUBLIC/storage"
+            fi
+
+            echo "== Optimizando Laravel =="
+            php artisan config:cache
+            php artisan view:cache
+
+            echo "== Deploy completado correctamente =="
