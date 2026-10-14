@@ -1,4 +1,4 @@
-name: Deploy Laravel to Hostinger
+name: Deploy Laravel - Upgrade La 79
 
 on:
   push:
@@ -11,24 +11,34 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy via SSH
+      - name: Deploy to Hostinger
         uses: appleboy/ssh-action@v1.2.2
         with:
-          host: ${{ secrets.HOSTINGER_HOST }}
-          username: ${{ secrets.HOSTINGER_USERNAME }}
+          host: 212.85.29.152
+          username: u497825029
           password: ${{ secrets.HOSTINGER_PASSWORD }}
           port: 65002
           command_timeout: 10m
           script: |
             set -e
 
-            cd "${{ secrets.HOSTINGER_PROJECT_PATH }}"
+            PROJECT_DIR="$HOME/domains/crmupgradecol.com/laravel"
+
+            if [ ! -d "$PROJECT_DIR/.git" ]; then
+              echo "ERROR: Laravel no está instalado."
+              echo "Primero debemos clonar el repositorio."
+              exit 1
+            fi
+
+            cd "$PROJECT_DIR"
 
             git pull --ff-only origin main
 
             composer2 install --no-dev --optimize-autoloader --no-interaction
 
             php artisan optimize:clear
+
+            php artisan migrate:status
 
             php artisan migrate --force
 
