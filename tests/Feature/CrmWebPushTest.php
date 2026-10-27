@@ -199,13 +199,15 @@ class CrmWebPushTest extends TestCase
 
     public function test_success_uses_same_content_badge_real_routes_and_suppresses_duplicate_delivery(): void
     {
+        $this->freezeTime();
         $admin = $this->user('admin');
         $device = $this->device($admin);
         $notice = $this->notice($admin);
         $transport = $this->mock(WebPushTransport::class);
-        $transport->shouldReceive('send')->once()->withArgs(fn ($sub, $payload) => $sub->id === $device->id
+        $transport->shouldReceive('send')->once()->withArgs(fn ($sub, $payload, $options) => $sub->id === $device->id
             && $payload['notification_id'] === $notice->id && $payload['user_id'] === $admin->id
-            && $payload['url'] === '/crm/orders' && $payload['title'] === $notice->title && $payload['unread_count'] === 1)->andReturn(201);
+            && $payload['url'] === '/crm/orders' && $payload['title'] === $notice->title && $payload['unread_count'] === 1
+            && $options === ['TTL' => 86400, 'urgency' => 'high'])->andReturn(201);
         $job = new SendCrmWebPush($notice->id, $device->id);
         $job->handle($transport, app(CrmWebPush::class));
         $job->handle($transport, app(CrmWebPush::class));
@@ -218,16 +220,68 @@ class CrmWebPushTest extends TestCase
         $this->assertSame('/crm/notifications', $push->url($notice->fill(['reference_type' => 'product']), $this->user()));
     }
 
+    public function test_job_passes_high_priority_only_for_time_sensitive_operational_types(): void
+    {
+        $this->freezeTime();
+        $admin = $this->user('admin');
+        $device = $this->device($admin);
+        $urgentTypes = ['task_assigned', 'task_reassigned', 'task_cancelled',
+            'appointment_assigned', 'appointment_rescheduled', 'appointment_reassigned', 'appointment_cancelled',
+            'payment_received', 'payment_reconciliation_required', 'order_ecommerce_pending'];
+        $this->assertCount(10, $urgentTypes);
+        foreach ($urgentTypes as $type) {
+            $this->assertContains($type, config('webpush.types'));
+        }
+        foreach (config('webpush.types') as $type) {
+            $notice = $this->notice($admin, $type, $type);
+            $urgent = in_array($type, $urgentTypes, true);
+            $expected = ['TTL' => $urgent ? 86400 : 3600, 'urgency' => $urgent ? 'high' : 'normal'];
+            $transport = $this->mock(WebPushTransport::class);
+            $transport->shouldReceive('send')->once()->withArgs(fn ($sub, $payload, $options) => $sub->id === $device->id
+                && $payload['notification_id'] === $notice->id && $options === $expected)->andReturn(201);
+            (new SendCrmWebPush($notice->id, $device->id))->handle($transport, app(CrmWebPush::class));
+            $this->assertNotNull($device->fresh()->last_sent_at, $type);
+        }
+    }
+
+    public function test_queued_alert_ttl_never_extends_its_existing_24_hour_lifetime(): void
+    {
+        $this->freezeTime();
+        $admin = $this->user('admin');
+        $device = $this->device($admin);
+        foreach ([['task_assigned', 3600, 82800], ['task_assigned', 82800, 3600],
+            ['task_assigned', 86399, 1], ['stock_low', 84600, 1800]] as [$type, $age, $ttl]) {
+            $notice = $this->notice($admin, $type, $type.$age);
+            $notice->forceFill(['created_at' => now()->subSeconds($age)])->save();
+            $transport = $this->mock(WebPushTransport::class);
+            $transport->shouldReceive('send')->once()->withArgs(fn ($sub, $payload, $options) => $options === [
+                'TTL' => $ttl, 'urgency' => $type === 'task_assigned' ? 'high' : 'normal',
+            ])->andReturn(201);
+            (new SendCrmWebPush($notice->id, $device->id))->handle($transport, app(CrmWebPush::class));
+        }
+        $transport = $this->mock(WebPushTransport::class);
+        $transport->shouldNotReceive('send');
+        foreach ([86400, 86401] as $age) {
+            $notice = $this->notice($admin, 'task_assigned', 'expired'.$age);
+            $notice->forceFill(['created_at' => now()->subSeconds($age)])->save();
+            (new SendCrmWebPush($notice->id, $device->id))->handle($transport, app(CrmWebPush::class));
+        }
+    }
+
     public function test_expired_provider_subscriptions_are_deactivated_for_404_and_410(): void
     {
+        $this->freezeTime();
         $admin = $this->user('admin');
         $notice = $this->notice($admin);
         foreach ([404, 410] as $status) {
             $device = $this->device($admin, (string) $status);
             $transport = $this->mock(WebPushTransport::class);
-            $transport->shouldReceive('send')->once()->andReturn($status);
+            $transport->shouldReceive('send')->once()->withArgs(fn ($sub, $payload, $options) => $options === [
+                'TTL' => 86400, 'urgency' => 'high',
+            ])->andReturn($status);
             (new SendCrmWebPush($notice->id, $device->id))->handle($transport, app(CrmWebPush::class));
             $this->assertFalse($device->fresh()->is_active);
+            $this->assertNull($device->fresh()->last_sent_at);
         }
     }
 
@@ -255,11 +309,13 @@ class CrmWebPushTest extends TestCase
 
     public function test_personal_operational_alerts_reach_only_the_existing_owner_without_administrative_permission(): void
     {
+        $this->freezeTime();
         $user = $this->user();
         $device = $this->device($user);
         $notice = $this->notice($user, 'task_assigned');
         $transport = $this->mock(WebPushTransport::class);
-        $transport->shouldReceive('send')->once()->withArgs(fn ($sub, $payload) => $payload['user_id'] === $user->id && $payload['url'] === '/crm/notifications')->andReturn(201);
+        $transport->shouldReceive('send')->once()->withArgs(fn ($sub, $payload, $options) => $payload['user_id'] === $user->id
+            && $payload['url'] === '/crm/notifications' && $options === ['TTL' => 86400, 'urgency' => 'high'])->andReturn(201);
         (new SendCrmWebPush($notice->id, $device->id))->handle($transport, app(CrmWebPush::class));
         $this->getJson('/api/admin/notifications')->assertUnauthorized();
         Sanctum::actingAs($user);
@@ -285,12 +341,13 @@ class CrmWebPushTest extends TestCase
 
     public function test_real_webpush_encryption_and_vapid_headers_with_fake_http_provider(): void
     {
+        $this->freezeTime();
         $keys = VAPID::createVapidKeys();
         $subscriberKeys = VAPID::createVapidKeys();
         config(['webpush.public_key' => $keys['publicKey'], 'webpush.private_key' => $keys['privateKey'],
             'webpush.subject' => 'https://upgradecolombia.com']);
         $history = [];
-        $handler = HandlerStack::create(new MockHandler([new Response(201)]));
+        $handler = HandlerStack::create(new MockHandler(array_fill(0, 4, new Response(201))));
         $handler->push(Middleware::history($history));
         $client = new WebPush(['VAPID' => ['subject' => config('webpush.subject'),
             'publicKey' => $keys['publicKey'], 'privateKey' => $keys['privateKey']]], [], 15,
@@ -304,18 +361,29 @@ class CrmWebPushTest extends TestCase
                 return $this->webPush;
             }
         };
-        $device = $this->device($this->user());
+        $admin = $this->user('admin');
+        $device = $this->device($admin);
         $device->update(['p256dh' => $subscriberKeys['publicKey']]);
-        $this->assertSame(201, $transport->send($device, ['title' => 'Alerta privada QA', 'notification_id' => 1]));
-        $this->assertCount(1, $history);
-        $request = $history[0]['request'];
-        $this->assertSame('aes128gcm', $request->getHeaderLine('Content-Encoding'));
-        $this->assertStringStartsWith('vapid ', $request->getHeaderLine('Authorization'));
-        preg_match('/vapid t=([^,]+)/', $request->getHeaderLine('Authorization'), $matches);
-        $claims = json_decode(base64_decode(strtr(explode('.', $matches[1])[1], '-_', '+/')), true, flags: JSON_THROW_ON_ERROR);
-        $this->assertSame('https://upgradecolombia.com', $claims['sub']);
-        $this->assertStringNotContainsString('Alerta privada QA', (string) $request->getBody());
-        $this->assertFalse($history[0]['options']['allow_redirects']);
+        foreach ([['task_assigned', 0, 'high', 86400], ['payment_received', 82800, 'high', 3600],
+            ['stock_low', 0, 'normal', 3600], ['quotation_expiring', 84600, 'normal', 1800]] as $index => [$type, $age, $urgency, $ttl]) {
+            $notice = $this->notice($admin, $type, $type);
+            $notice->forceFill(['title' => 'Alerta privada QA', 'created_at' => now()->subSeconds($age)])->save();
+            (new SendCrmWebPush($notice->id, $device->id))->handle($transport, app(CrmWebPush::class));
+            $this->assertCount($index + 1, $history);
+            $request = $history[$index]['request'];
+            $this->assertSame($urgency, $request->getHeaderLine('Urgency'));
+            $this->assertSame((string) $ttl, $request->getHeaderLine('TTL'));
+            $this->assertSame('aes128gcm', $request->getHeaderLine('Content-Encoding'));
+            $this->assertStringStartsWith('vapid ', $request->getHeaderLine('Authorization'));
+            $this->assertStringContainsString('k='.$keys['publicKey'], $request->getHeaderLine('Authorization'));
+            preg_match('/vapid t=([^,]+)/', $request->getHeaderLine('Authorization'), $matches);
+            $claims = json_decode(base64_decode(strtr(explode('.', $matches[1])[1], '-_', '+/')), true, flags: JSON_THROW_ON_ERROR);
+            $this->assertSame('https://upgradecolombia.com', $claims['sub']);
+            $this->assertSame('https://fcm.googleapis.com', $claims['aud']);
+            $this->assertStringNotContainsString('Alerta privada QA', (string) $request->getBody());
+            $this->assertFalse($history[$index]['options']['allow_redirects']);
+            $this->assertNotNull($device->fresh()->last_sent_at);
+        }
     }
 
     public function test_provider_failure_is_retried_without_logging_endpoint_or_crypto_keys(): void
@@ -334,18 +402,22 @@ class CrmWebPushTest extends TestCase
 
     public function test_transient_provider_statuses_retry_and_invalid_stored_endpoints_are_disabled(): void
     {
+        $this->freezeTime();
         $user = $this->user();
         $device = $this->device($user);
         $notice = $this->notice($user, 'task_assigned');
         foreach ([429, 500, 503] as $status) {
             $transport = $this->mock(WebPushTransport::class);
-            $transport->shouldReceive('send')->once()->andReturn($status);
+            $transport->shouldReceive('send')->once()->withArgs(fn ($sub, $payload, $options) => $options === [
+                'TTL' => 86400, 'urgency' => 'high',
+            ])->andReturn($status);
             try {
                 (new SendCrmWebPush($notice->id, $device->id))->handle($transport, app(CrmWebPush::class));
                 $this->fail('Transient provider status must fail the job for retry.');
             } catch (\RuntimeException $exception) {
                 $this->assertSame('Temporary Web Push provider failure.', $exception->getMessage());
                 $this->assertTrue($device->fresh()->is_active);
+                $this->assertNull($device->fresh()->last_sent_at);
             }
         }
         $device->update(['endpoint' => 'https://127.0.0.1/private']);
@@ -353,5 +425,27 @@ class CrmWebPushTest extends TestCase
         $transport->shouldNotReceive('send');
         (new SendCrmWebPush($notice->id, $device->id))->handle($transport, app(CrmWebPush::class));
         $this->assertFalse($device->fresh()->is_active);
+    }
+
+    public function test_non_expiration_client_errors_remain_visible_without_disabling_the_subscription(): void
+    {
+        $this->freezeTime();
+        $user = $this->user();
+        $device = $this->device($user);
+        $notice = $this->notice($user, 'task_assigned');
+        foreach ([400, 401, 403] as $status) {
+            $transport = $this->mock(WebPushTransport::class);
+            $transport->shouldReceive('send')->once()->withArgs(fn ($sub, $payload, $options) => $options === [
+                'TTL' => 86400, 'urgency' => 'high',
+            ])->andReturn($status);
+            try {
+                (new SendCrmWebPush($notice->id, $device->id))->handle($transport, app(CrmWebPush::class));
+                $this->fail('Provider rejection must not be recorded as a successful delivery.');
+            } catch (\RuntimeException $exception) {
+                $this->assertSame('Web Push rejected: check VAPID configuration and subscription (HTTP '.$status.').', $exception->getMessage());
+                $this->assertTrue($device->fresh()->is_active);
+                $this->assertNull($device->fresh()->last_sent_at);
+            }
+        }
     }
 }

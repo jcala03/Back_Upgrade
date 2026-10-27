@@ -11,6 +11,19 @@ use Throwable;
 
 class CrmWebPush
 {
+    private const HIGH_URGENCY_TYPES = [
+        CrmNotification::TYPE_TASK_ASSIGNED,
+        CrmNotification::TYPE_TASK_REASSIGNED,
+        CrmNotification::TYPE_TASK_CANCELLED,
+        CrmNotification::TYPE_APPOINTMENT_ASSIGNED,
+        CrmNotification::TYPE_APPOINTMENT_RESCHEDULED,
+        CrmNotification::TYPE_APPOINTMENT_REASSIGNED,
+        CrmNotification::TYPE_APPOINTMENT_CANCELLED,
+        CrmNotification::TYPE_PAYMENT_RECEIVED,
+        CrmNotification::TYPE_PAYMENT_RECONCILIATION_REQUIRED,
+        CrmNotification::TYPE_ORDER_ECOMMERCE_PENDING,
+    ];
+
     public static function configured(): bool
     {
         return (bool) config('webpush.enabled') && (bool) config('webpush.public_key')
@@ -61,6 +74,19 @@ class CrmWebPush
         };
 
         return $user->hasPermission($permission) ? $path : '/crm/notifications';
+    }
+
+    /** @return array{TTL: int, urgency: string} */
+    public function deliveryOptions(CrmNotification $notification): array
+    {
+        $urgent = in_array($notification->type, self::HIGH_URGENCY_TYPES, true);
+        // A queued/retried alert must not get another full day after its existing age limit.
+        $remainingLifetime = $notification->created_at->copy()->addDay()->getTimestamp() - now()->getTimestamp();
+
+        return [
+            'TTL' => max(1, min($urgent ? 86400 : 3600, $remainingLifetime)),
+            'urgency' => $urgent ? 'high' : 'normal',
+        ];
     }
 
     public function payload(CrmNotification $notification, User $user): array

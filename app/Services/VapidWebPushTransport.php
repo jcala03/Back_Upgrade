@@ -21,14 +21,14 @@ class VapidWebPushTransport implements WebPushTransport
         ], app(LoggerInterface::class));
     }
 
-    public function send(PushSubscription $subscription, array $payload): int
+    public function send(PushSubscription $subscription, array $payload, array $options = []): int
     {
         $report = $this->client()->sendOneNotification(Subscription::create([
             'endpoint' => $subscription->endpoint,
             'publicKey' => $subscription->p256dh,
             'authToken' => $subscription->auth,
             'contentEncoding' => 'aes128gcm',
-        ]), json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
+        ]), json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE), $options);
 
         return $report->isSuccess() ? 201 : ($report->getResponse()?->getStatusCode() ?? 503);
     }

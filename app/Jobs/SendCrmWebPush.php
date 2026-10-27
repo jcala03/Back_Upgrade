@@ -57,7 +57,11 @@ class SendCrmWebPush implements ShouldBeUnique, ShouldQueue
             return;
         }
         try {
-            $status = $transport->send($subscription, $push->payload($notification, $subscription->user));
+            $status = $transport->send(
+                $subscription,
+                $push->payload($notification, $subscription->user),
+                $push->deliveryOptions($notification),
+            );
         } catch (Throwable) {
             // Do not leak provider request URLs or crypto keys into failed_jobs/logs.
             throw new RuntimeException('Temporary Web Push transport failure.');
