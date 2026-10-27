@@ -15,6 +15,7 @@ use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
 use RuntimeException;
+use Tests\Support\CommercialAccess;
 use Tests\TestCase;
 
 class QuotationBranchOwnershipPhaseThreeTest extends TestCase
@@ -111,7 +112,7 @@ class QuotationBranchOwnershipPhaseThreeTest extends TestCase
         $user = User::factory()->create(['role' => User::ROLE_USER, 'is_active' => true]);
         $employee = $this->employee($branch, 'Propietario', $user);
 
-        Sanctum::actingAs($user);
+        Sanctum::actingAs(CommercialAccess::limited($user, []));
         $this->getJson('/api/my/quotations')->assertForbidden();
         $this->postJson('/api/my/quotations', $this->payload($product, []))->assertForbidden();
 
@@ -248,7 +249,7 @@ class QuotationBranchOwnershipPhaseThreeTest extends TestCase
             'sales_employee_id' => $employee->id,
         ]))->assertCreated()->json('data.id');
 
-        Sanctum::actingAs($user);
+        Sanctum::actingAs(CommercialAccess::limited($user, [UserCapability::QUOTATIONS_VIEW_OWN]));
         $this->patchJson("/api/my/quotations/{$quotationId}", $this->payload($product, []))
             ->assertForbidden();
         $this->postJson("/api/my/quotations/{$quotationId}/send")->assertForbidden();

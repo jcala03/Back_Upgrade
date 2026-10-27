@@ -15,10 +15,12 @@ class ProductCategory extends Model
         'slug',
         'description',
         'is_active',
+        'requires_oem_compatibility',
     ];
 
     protected $casts = [
         'is_active' => 'boolean',
+        'requires_oem_compatibility' => 'boolean',
     ];
 
     public function fields(): HasMany

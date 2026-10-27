@@ -17,6 +17,10 @@ class VehicleMultimediaSystemController extends Controller
         $systems = VehicleMultimediaSystem::query()
             ->with(['vehicleBrand', 'vehicleVersions.model.brand'])
             ->where('is_active', true)
+            ->when($request->filled('vehicle_version_id'), function (Builder $query) use ($request) {
+                $query->whereHas('vehicleVersions', fn ($version) => $version
+                    ->whereKey($request->integer('vehicle_version_id'))->where('is_active', true));
+            })
             ->when($request->filled('vehicle_brand_id'), function (Builder $query) use ($request) {
                 $query->where('vehicle_brand_id', $request->integer('vehicle_brand_id'));
             })

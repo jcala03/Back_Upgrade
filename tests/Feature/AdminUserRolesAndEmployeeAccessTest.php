@@ -11,6 +11,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Laravel\Sanctum\Sanctum;
+use Tests\Support\CommercialAccess;
 use Tests\TestCase;
 
 class AdminUserRolesAndEmployeeAccessTest extends TestCase
@@ -36,7 +37,7 @@ class AdminUserRolesAndEmployeeAccessTest extends TestCase
         $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
         $this->assertTrue($user->isUser());
         $this->assertFalse($user->isAdmin());
-        $this->assertSame(['notifications.view', 'notifications.update', 'business_overview.view'], $user->permissions());
+        $this->assertSame(CommercialAccess::DEFAULT_PERMISSIONS, $user->permissions());
         $this->assertTrue($admin->hasPermission('dashboard.financials'));
         $this->assertTrue($admin->hasPermission('employees.delete'));
 
@@ -60,13 +61,13 @@ class AdminUserRolesAndEmployeeAccessTest extends TestCase
         $this->assertSame('user', trim((string) $column->COLUMN_DEFAULT, "'"));
     }
 
-    public function test_minimal_user_can_auth_profile_password_and_own_notifications_only(): void
+    public function test_commercial_user_can_auth_profile_and_own_notifications_without_admin_access(): void
     {
         $user = User::factory()->create(['role' => User::ROLE_USER, 'password' => 'OldPassword1']);
         $notice = CrmNotification::create(['user_id' => $user->id, 'type' => CrmNotification::TYPE_STOCK_LOW, 'severity' => 'warning', 'title' => 'Propia', 'message' => 'Mensaje']);
         $order = Order::create(['order_number' => 'ROLE-TEST-1', 'origin' => Order::ORIGIN_CRM, 'subtotal' => 1000, 'discount_total' => 0, 'total' => 1000, 'status' => Order::STATUS_CONFIRMED, 'payment_status' => Order::PAYMENT_UNPAID]);
         $this->postJson('/api/auth/login', ['email' => $user->email, 'password' => 'OldPassword1'])
-            ->assertOk()->assertJsonPath('user.role', 'user')->assertJsonPath('user.permissions', ['notifications.view', 'notifications.update', 'business_overview.view']);
+            ->assertOk()->assertJsonPath('user.role', 'user')->assertJsonPath('user.permissions', CommercialAccess::DEFAULT_PERMISSIONS);
         $this->getJson('/api/auth/me')->assertOk();
         $this->patchJson('/api/auth/me', ['name' => 'Nombre propio'])->assertOk();
         $this->patchJson('/api/auth/me/password', ['current_password' => 'OldPassword1', 'password' => 'NewPassword1', 'password_confirmation' => 'NewPassword1'])->assertOk();

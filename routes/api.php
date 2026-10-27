@@ -35,6 +35,7 @@ use App\Http\Controllers\Api\PersonalCommercialDiscoveryController;
 use App\Http\Controllers\Api\ProductBrandController;
 use App\Http\Controllers\Api\ProductCategoryController;
 use App\Http\Controllers\Api\ProductController;
+use App\Http\Controllers\Api\PushSubscriptionController;
 use App\Http\Controllers\Api\QuotationController;
 use App\Http\Controllers\Api\ReportsController;
 use App\Http\Controllers\Api\ServiceCategoryController;
@@ -104,6 +105,12 @@ Route::post('/checkout/orders/{publicToken}/pickup', [CheckoutOrderController::c
 
 Route::middleware(['auth:sanctum', EnsureUserIsActive::class])->group(function () {
     Route::get('/auth/me', [AuthController::class, 'me']);
+    Route::prefix('push')->middleware('throttle:60,1')->group(function () {
+        Route::get('/config', [PushSubscriptionController::class, 'config']);
+        Route::get('/subscriptions', [PushSubscriptionController::class, 'index']);
+        Route::post('/subscriptions', [PushSubscriptionController::class, 'store']);
+        Route::delete('/subscriptions/{subscription}', [PushSubscriptionController::class, 'destroy'])->whereNumber('subscription');
+    });
     Route::patch('/auth/me', [AuthController::class, 'updateProfile']);
     Route::patch('/auth/me/password', [AuthController::class, 'updatePassword']);
 

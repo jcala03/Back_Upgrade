@@ -65,6 +65,7 @@ class ProductCategoryController extends Controller
             'name' => $validated['name'],
             'slug' => $this->generateUniqueSlug($validated['name']),
             'description' => $validated['description'] ?? null,
+            'requires_oem_compatibility' => $validated['requires_oem_compatibility'] ?? false,
             'is_active' => $request->boolean('is_active', true),
         ]);
 
@@ -90,6 +91,7 @@ class ProductCategoryController extends Controller
             'name' => $validated['name'],
             'slug' => $newSlug,
             'description' => $validated['description'] ?? null,
+            'requires_oem_compatibility' => $validated['requires_oem_compatibility'] ?? $productCategory->requires_oem_compatibility,
             'is_active' => $request->boolean('is_active', true),
         ]);
 
@@ -143,6 +145,7 @@ class ProductCategoryController extends Controller
             ],
             'description' => ['nullable', 'string'],
             'is_active' => ['nullable', 'boolean'],
+            'requires_oem_compatibility' => ['sometimes', 'boolean'],
 
             'fields' => ['nullable', 'array'],
             'fields.*.id' => ['nullable', 'integer'],

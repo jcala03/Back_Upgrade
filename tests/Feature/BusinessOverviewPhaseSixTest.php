@@ -18,6 +18,7 @@ use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
 use RuntimeException;
+use Tests\Support\CommercialAccess;
 use Tests\TestCase;
 
 class BusinessOverviewPhaseSixTest extends TestCase
@@ -61,8 +62,8 @@ class BusinessOverviewPhaseSixTest extends TestCase
         $this->assertTrue($user->hasPermission('business_overview.view'));
         $this->assertTrue($user->hasPermission('notifications.view'));
         $this->assertTrue($user->hasPermission('notifications.update'));
-        $this->assertFalse($user->hasPermission(UserCapability::ORDERS_VIEW_OWN));
-        $this->assertFalse($user->hasPermission(UserCapability::QUOTATIONS_VIEW_OWN));
+        $this->assertTrue($user->hasPermission(UserCapability::ORDERS_VIEW_OWN));
+        $this->assertTrue($user->hasPermission(UserCapability::QUOTATIONS_VIEW_OWN));
         $this->assertFalse($user->hasPermission(UserCapability::COMMISSIONS_VIEW_OWN));
         $this->assertNotContains('business_overview.view', UserCapability::allowed());
         $this->assertNotContains('sales', User::roles());
@@ -256,7 +257,7 @@ class BusinessOverviewPhaseSixTest extends TestCase
         $this->productItem($order, $this->product(), 2, 75000, 25000);
         $this->quotation($branch, $employee, Quotation::STATUS_CONVERTED, '2026-08-30');
 
-        Sanctum::actingAs($user);
+        Sanctum::actingAs(CommercialAccess::limited($user, ['business_overview.view']));
         $this->getJson('/api/my/business-overview')->assertOk()
             ->assertJsonPath('data.company.sales_count', 1)
             ->assertJsonPath('data.personal.sales.available', false)
@@ -309,7 +310,7 @@ class BusinessOverviewPhaseSixTest extends TestCase
             ->assertJsonPath('data.personal.commissions.earned_amount', 20000)
             ->assertJsonPath('data.personal.commissions.voided_amount', 30000)
             ->assertJsonPath('data.personal.commissions.earned_units', 2)
-            ->assertJsonPath('data.personal.sales.available', false)
+            ->assertJsonPath('data.personal.sales.available', true)
             ->assertJsonMissingPath('data.personal.commissions.salary')
             ->assertJsonMissingPath('data.personal.commissions.payroll');
         $this->assertStringNotContainsString('999999', $response->getContent());

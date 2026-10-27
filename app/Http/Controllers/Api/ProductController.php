@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Resources\AdminProductResource;
 use App\Http\Resources\PublicProductResource;
 use App\Models\Product;
+use App\Models\ProductCategory;
 use App\Models\ProductVariant;
 use App\Models\VehicleModel;
 use App\Models\VehicleVersion;
@@ -14,6 +15,7 @@ use App\Services\ProductPricingService;
 use App\Services\ProductSpecValueService;
 use App\Services\ProductVariantCompatibilityService;
 use App\Services\ProductVariantSpecValueService;
+use App\Services\PublicVehicleCompatibility;
 use App\Support\Catalog\PublicProductStockQuery;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -41,10 +43,10 @@ class ProductController extends Controller
     public function index(Request $request): JsonResponse
     {
         $query = Product::query()
-            ->with($this->publicRelations())
+            ->with($this->publicRelations($request))
             ->where('is_active', true)
             ->where('is_visible', true);
-        PublicProductStockQuery::addProductAggregates($query);
+        $this->addPublicSelection($query, $request);
 
         $this->applyProductFilters($query, $request, true);
         $this->applyProductSorting($query, $request, true);
@@ -61,8 +63,8 @@ class ProductController extends Controller
         }
 
         $query = Product::query()->whereKey($product->id);
-        PublicProductStockQuery::addProductAggregates($query);
-        $product = $query->with($this->publicRelations())->firstOrFail();
+        $this->addPublicSelection($query, $request);
+        $product = $query->with($this->publicRelations($request))->firstOrFail();
 
         return response()->json([
             'data' => (new PublicProductResource($product))->resolve($request),
@@ -240,7 +242,18 @@ class ProductController extends Controller
         ]);
     }
 
-    private function publicRelations(): array
+    private function addPublicSelection(Builder $query, Request $request): void
+    {
+        $variants = PublicVehicleCompatibility::active($request) ? PublicVehicleCompatibility::variants($request) : null;
+        PublicProductStockQuery::addProductAggregates($query, $variants);
+        if ($variants) {
+            PublicVehicleCompatibility::products($query, $request);
+            $query->selectSub((clone $variants)->selectRaw('MIN(product_variants.price)')
+                ->whereColumn('product_variants.product_id', 'products.id'), 'public_price');
+        }
+    }
+
+    private function publicRelations(?Request $request = null): array
     {
         return [
             'images',
@@ -250,7 +263,10 @@ class ProductController extends Controller
             'vehicleCompatibilities.vehicleBrand',
             'vehicleCompatibilities.vehicleModel',
             'vehicleCompatibilities.vehicleVersion',
-            'variants' => function ($query) {
+            'variants' => function ($query) use ($request) {
+                if ($request) {
+                    PublicVehicleCompatibility::matchVariant($query->getQuery(), $request);
+                }
                 $query
                     ->where('is_active', true)
                     ->where('is_visible', true)
@@ -677,6 +693,21 @@ class ProductController extends Controller
         ]);
 
         $validated = $validator->validate();
+        $requiresOem = (bool) ProductCategory::find($validated['category_id'] ?? $product?->category_id)?->requires_oem_compatibility;
+        if ($requiresOem) {
+            $variants = $validated['variants'] ?? $product?->variants()->with('vehicleCompatibilities')->get()->toArray() ?? [];
+            if (empty($variants)) {
+                throw ValidationException::withMessages(['variants' => 'Esta categoría requiere variantes con compatibilidad OEM específica.']);
+            }
+            foreach ($variants as $index => $variant) {
+                $saved = ! empty($variant['id']) ? $product?->variants()->find($variant['id']) : null;
+                $type = array_key_exists('compatibility_type', $variant) ? $variant['compatibility_type'] : $saved?->compatibility_type;
+                if ($type !== Product::COMPATIBILITY_TYPE_VEHICLE_SPECIFIC) {
+                    throw ValidationException::withMessages(["variants.{$index}.compatibility_type" => 'Configura compatibilidad específica por variante; la compatibilidad general no identifica el OEM.']);
+                }
+                $this->variantCompatibilityService->validateSelection($type, $variant['vehicle_compatibilities'] ?? $saved?->vehicleCompatibilities()->get()->toArray() ?? [], "variants.{$index}.vehicle_compatibilities", true);
+            }
+        }
 
         $commissionEnabled = array_key_exists('commission_enabled', $validated)
             ? (bool) $validated['commission_enabled']
@@ -1187,13 +1218,21 @@ class ProductController extends Controller
                 $request->input('in_stock')
             )
         ) {
-            PublicProductStockQuery::applyInStockFilter($query);
+            PublicProductStockQuery::applyInStockFilter($query, PublicVehicleCompatibility::active($request) ? PublicVehicleCompatibility::variants($request) : null);
         }
 
-        if (
-            $request->filled('min_price') ||
-            $request->filled('max_price')
-        ) {
+        if ($public && PublicVehicleCompatibility::active($request)) {
+            foreach (['min_price' => '>=', 'max_price' => '<='] as $key => $operator) {
+                if ($request->filled($key)) {
+                    $price = PublicVehicleCompatibility::variants($request)->selectRaw('MIN(product_variants.price)')
+                        ->whereColumn('product_variants.product_id', 'products.id');
+                    $query->whereRaw('COALESCE(('.$price->toSql().'), products.price) '.$operator.' ?', [...$price->getBindings(), $request->integer($key)]);
+                }
+            }
+        }
+
+        if (! ($public && PublicVehicleCompatibility::active($request))
+            && ($request->filled('min_price') || $request->filled('max_price'))) {
             $minPrice = $request->filled('min_price')
                 ? (int) $request->input('min_price')
                 : null;
@@ -1260,7 +1299,7 @@ class ProductController extends Controller
             );
         }
 
-        if ($request->filled('vehicle_multimedia_system_id')) {
+        if (! $public && $request->filled('vehicle_multimedia_system_id')) {
             $query->whereHas('variants', function (Builder $variantQuery) use ($request, $public) {
                 $systemId = $request->integer('vehicle_multimedia_system_id');
 
@@ -1280,11 +1319,11 @@ class ProductController extends Controller
             });
         }
 
-        if (
+        if (! $public && (
             $request->filled('vehicle_brand_id') ||
             $request->filled('vehicle_model_id') ||
             $request->filled('vehicle_version_id') ||
-            $request->filled('year')
+            $request->filled('year'))
         ) {
             $this->applyVehicleCompatibilityFilters(
                 $query,
@@ -1535,11 +1574,16 @@ class ProductController extends Controller
         );
 
         if ($sort === 'stock' && $public) {
-            PublicProductStockQuery::applyStockSort($query);
+            PublicProductStockQuery::applyStockSort($query, PublicVehicleCompatibility::active($request) ? PublicVehicleCompatibility::variants($request) : null);
 
             return;
         }
 
+        if ($public && PublicVehicleCompatibility::active($request) && in_array($sort, ['price_asc', 'price_desc'], true)) {
+            $query->orderByRaw('COALESCE(public_price, products.price) '.($sort === 'price_asc' ? 'asc' : 'desc'));
+
+            return;
+        }
         match ($sort) {
             'price_asc' => $query->orderByRaw(
                 $this->variantPriceSubquery($public).' asc'

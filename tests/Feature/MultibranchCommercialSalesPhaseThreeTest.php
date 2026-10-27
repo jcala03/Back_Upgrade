@@ -18,6 +18,7 @@ use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Laravel\Sanctum\Sanctum;
 use RuntimeException;
+use Tests\Support\CommercialAccess;
 use Tests\TestCase;
 
 class MultibranchCommercialSalesPhaseThreeTest extends TestCase
@@ -329,18 +330,17 @@ class MultibranchCommercialSalesPhaseThreeTest extends TestCase
         $this->getJson("/api/my/sales/{$orderId}")->assertNotFound();
     }
 
-    public function test_my_sales_capabilities_are_independent_and_missing_employee_list_is_safe(): void
+    public function test_my_sales_reject_missing_permission_and_missing_employee_list_is_safe(): void
     {
         $user = User::factory()->create(['role' => User::ROLE_USER, 'is_active' => true]);
-        Sanctum::actingAs($user);
-
+        Sanctum::actingAs(CommercialAccess::limited($user, []));
         $this->getJson('/api/my/sales')->assertForbidden();
         UserCapability::create([
             'user_id' => $user->id,
             'capability' => UserCapability::ORDERS_VIEW_OWN,
         ]);
         $user->unsetRelation('capabilities');
-
+        Sanctum::actingAs($user);
         $this->getJson('/api/my/sales')->assertOk()
             ->assertJsonPath('data.employee_linked', false)
             ->assertJsonPath('data.sales', []);
@@ -438,8 +438,7 @@ class MultibranchCommercialSalesPhaseThreeTest extends TestCase
             'status' => Order::STATUS_PENDING,
             'payment_status' => Order::PAYMENT_UNPAID,
         ]);
-        Sanctum::actingAs($owner);
-
+        Sanctum::actingAs(CommercialAccess::limited($owner, [UserCapability::ORDERS_VIEW_OWN]));
         $this->postJson('/api/my/sales', $this->salePayload($product))->assertForbidden();
         $this->postJson("/api/my/sales/{$order->id}/confirm")->assertForbidden();
         $this->postJson("/api/my/sales/{$order->id}/complete")->assertForbidden();

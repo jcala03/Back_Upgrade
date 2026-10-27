@@ -4,10 +4,15 @@ namespace App\Providers;
 
 use App\Contracts\LandedCostProvider;
 use App\Contracts\ShippingQuoteProvider;
+use App\Contracts\WebPushTransport;
+use App\Models\CrmNotification;
+use App\Services\CrmWebPush;
 use App\Services\DhlLandedCostProvider;
 use App\Services\EnviaShippingQuoteProvider;
+use App\Services\VapidWebPushTransport;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
@@ -31,6 +36,7 @@ class AppServiceProvider extends ServiceProvider
     {
         $this->app->bind(ShippingQuoteProvider::class, EnviaShippingQuoteProvider::class);
         $this->app->bind(LandedCostProvider::class, DhlLandedCostProvider::class);
+        $this->app->bind(WebPushTransport::class, VapidWebPushTransport::class);
     }
 
     /**
@@ -38,6 +44,11 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        CrmNotification::created(function ($notification) {
+            // No external delivery (or queued work) for a transaction that ultimately rolls back.
+            DB::afterCommit(fn () => app(CrmWebPush::class)->created($notification));
+        });
+
         RateLimiter::for('login', function (Request $request) {
             $email = Str::lower(trim((string) $request->input('email')));
 

@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\UpdatePasswordRequest;
 use App\Http\Requests\UpdateProfileRequest;
+use App\Models\PushSubscription;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -77,6 +78,11 @@ class AuthController extends Controller
 
     public function logout(Request $request)
     {
+        // Only the current browser; other devices belonging to this account remain subscribed.
+        if (is_string($endpoint = $request->input('push_endpoint')) && strlen($endpoint) <= 2048) {
+            PushSubscription::where('user_id', $request->user()->id)
+                ->where('endpoint_hash', hash('sha256', $endpoint))->update(['is_active' => false]);
+        }
         Auth::guard('web')->logout();
 
         if ($request->hasSession()) {

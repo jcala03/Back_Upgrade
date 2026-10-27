@@ -15,12 +15,12 @@ use Illuminate\Support\Facades\DB;
  */
 class PublicProductStockQuery
 {
-    public static function addProductAggregates(Builder $query): void
+    public static function addProductAggregates(Builder $query, ?Builder $variants = null): void
     {
         $query
             ->addSelect('products.*')
-            ->selectSub(self::productAggregateSubquery('quantity'), 'public_stock')
-            ->selectSub(self::productAggregateSubquery('minimum_quantity'), 'public_minimum');
+            ->selectSub(self::productAggregateSubquery('quantity', $variants), 'public_stock')
+            ->selectSub(self::productAggregateSubquery('minimum_quantity', $variants), 'public_minimum');
     }
 
     public static function addVariantAggregates(Builder $query): void
@@ -31,9 +31,9 @@ class PublicProductStockQuery
             ->selectSub(self::variantAggregateSubquery('minimum_quantity'), 'public_minimum');
     }
 
-    public static function applyInStockFilter(Builder $query): void
+    public static function applyInStockFilter(Builder $query, ?Builder $variants = null): void
     {
-        $subquery = self::productAggregateSubquery('quantity');
+        $subquery = self::productAggregateSubquery('quantity', $variants);
 
         $query->whereRaw(
             '('.$subquery->toSql().') > ?',
@@ -41,9 +41,9 @@ class PublicProductStockQuery
         );
     }
 
-    public static function applyStockSort(Builder $query): void
+    public static function applyStockSort(Builder $query, ?Builder $variants = null): void
     {
-        $subquery = self::productAggregateSubquery('quantity');
+        $subquery = self::productAggregateSubquery('quantity', $variants);
 
         $query->orderByRaw(
             '('.$subquery->toSql().') desc',
@@ -65,9 +65,9 @@ class PublicProductStockQuery
         return $stock > 0 && $stock <= $minimum;
     }
 
-    private static function productAggregateSubquery(string $column): QueryBuilder
+    private static function productAggregateSubquery(string $column, ?Builder $selectedVariants = null): QueryBuilder
     {
-        $variants = self::eligibleVariantAggregateSubquery($column);
+        $variants = self::eligibleVariantAggregateSubquery($column, $selectedVariants);
         $product = self::simpleProductAggregateSubquery($column);
 
         return DB::query()->selectRaw(
@@ -76,7 +76,7 @@ class PublicProductStockQuery
         );
     }
 
-    private static function eligibleVariantAggregateSubquery(string $column): QueryBuilder
+    private static function eligibleVariantAggregateSubquery(string $column, ?Builder $selectedVariants = null): QueryBuilder
     {
         return DB::table('product_variants as public_variants')
             ->leftJoin(
@@ -96,6 +96,7 @@ class PublicProductStockQuery
                     ->on('branches.id', '=', 'inventory_stocks.branch_id')
                     ->where('branches.is_active', true);
             })
+            ->when($selectedVariants, fn ($query) => $query->whereIn('public_variants.id', (clone $selectedVariants)->select('product_variants.id')))
             ->whereColumn('public_variants.product_id', 'products.id')
             ->where('public_variants.is_active', true)
             ->where('public_variants.is_visible', true)

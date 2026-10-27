@@ -12,6 +12,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Validation\ValidationException;
 use Laravel\Sanctum\Sanctum;
 use RuntimeException;
+use Tests\Support\CommercialAccess;
 use Tests\TestCase;
 
 class UserCapabilitiesPhaseThreeTest extends TestCase
@@ -48,7 +49,7 @@ class UserCapabilitiesPhaseThreeTest extends TestCase
         $user = User::factory()->create(['role' => User::ROLE_USER]);
         $admin = User::factory()->create(['role' => User::ROLE_ADMIN]);
 
-        $this->assertSame(['notifications.view', 'notifications.update', 'business_overview.view'], $user->permissions());
+        $this->assertSame(CommercialAccess::DEFAULT_PERMISSIONS, $user->permissions());
         $this->assertSame(['admin', 'user'], User::roles());
 
         UserCapability::create([
@@ -67,12 +68,7 @@ class UserCapabilitiesPhaseThreeTest extends TestCase
             'granted_by' => $admin->id,
         ]);
 
-        $this->assertSame([
-            'notifications.view',
-            'notifications.update',
-            'business_overview.view',
-            UserCapability::ORDERS_VIEW_OWN,
-        ], $user->fresh()->permissions());
+        $this->assertSame(CommercialAccess::DEFAULT_PERMISSIONS, $user->fresh()->permissions());
         $this->assertFalse($user->fresh()->hasPermission('reports.financials'));
         $this->assertTrue($admin->fresh()->hasPermission('reports.financials'));
         $this->assertFalse(in_array(UserCapability::COMMISSIONS_VIEW_OWN, $admin->fresh()->permissions(), true));
@@ -129,7 +125,8 @@ class UserCapabilitiesPhaseThreeTest extends TestCase
             'capabilities' => [],
         ])->assertOk()->assertJsonPath('data.capabilities', []);
         $this->assertDatabaseMissing('user_capabilities', ['user_id' => $target->id]);
-        $this->assertSame(['notifications.view', 'notifications.update', 'business_overview.view'], $target->fresh()->permissions());
+        // Revoking additional grants preserves mandatory commercial role permissions.
+        $this->assertSame(CommercialAccess::DEFAULT_PERMISSIONS, $target->fresh()->permissions());
     }
 
     public function test_capability_validation_rejects_duplicates_unknown_admin_permissions_and_admin_targets(): void
@@ -245,12 +242,7 @@ class UserCapabilitiesPhaseThreeTest extends TestCase
             'email' => $user->email,
             'password' => 'Password123',
         ])->assertOk()
-            ->assertJsonPath('user.permissions', [
-                'notifications.view',
-                'notifications.update',
-                'business_overview.view',
-                UserCapability::QUOTATIONS_CREATE_OWN,
-            ])
+            ->assertJsonPath('user.permissions', CommercialAccess::DEFAULT_PERMISSIONS)
             ->assertJsonPath('user.employee.name', 'Asesora Comercial')
             ->assertJsonPath('user.employee.branch.code', 'BOG')
             ->assertJsonMissingPath('user.employee.phone')

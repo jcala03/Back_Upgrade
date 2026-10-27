@@ -19,6 +19,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
 use RuntimeException;
+use Tests\Support\CommercialAccess;
 use Tests\TestCase;
 
 class PersonalCommercialDiscoveryTest extends TestCase
@@ -47,11 +48,12 @@ class PersonalCommercialDiscoveryTest extends TestCase
         $this->getJson('/api/my/service-options')->assertUnauthorized();
 
         $user = User::factory()->create(['role' => User::ROLE_USER, 'is_active' => true]);
-        Sanctum::actingAs($user);
+        Sanctum::actingAs(CommercialAccess::limited($user, []));
         $this->getJson('/api/my/customer-options?search=Ana')->assertForbidden();
         $this->getJson('/api/my/service-options')->assertForbidden();
 
         $this->grant($user, UserCapability::ORDERS_CREATE_OWN);
+        Sanctum::actingAs($user);
         $this->getJson('/api/my/customer-options?search=Ana')
             ->assertUnprocessable()->assertJsonValidationErrors('employee');
         $this->getJson('/api/my/service-options')

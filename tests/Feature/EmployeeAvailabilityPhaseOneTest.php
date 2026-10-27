@@ -11,6 +11,7 @@ use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
+use Tests\Support\CommercialAccess;
 use Tests\TestCase;
 
 class EmployeeAvailabilityPhaseOneTest extends TestCase
@@ -46,7 +47,7 @@ class EmployeeAvailabilityPhaseOneTest extends TestCase
         $this->assertSame(['working', 'non_working'], EmployeeScheduleOverride::types());
         $this->assertSame(['approved', 'cancelled'], EmployeeLeave::statuses());
         $this->assertTrue($admin->hasPermission('employee_availability.view'));
-        $this->assertSame(['notifications.view', 'notifications.update', 'business_overview.view'], User::factory()->make(['role' => User::ROLE_USER])->permissions());
+        $this->assertSame(CommercialAccess::DEFAULT_PERMISSIONS, User::factory()->make(['role' => User::ROLE_USER])->permissions());
     }
 
     public function test_schedule_endpoints_require_auth_and_admin_permissions(): void

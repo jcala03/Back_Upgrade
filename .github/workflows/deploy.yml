@@ -78,4 +78,9 @@ jobs:
             php artisan config:cache
             php artisan view:cache
 
+            echo "== Señalando reinicio de workers =="
+            # A process manager must start workers again after their current job.
+            # This signal does not create a worker or configure Hostinger.
+            php artisan queue:restart
+
             echo "== Deploy completado correctamente =="

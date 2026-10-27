@@ -15,7 +15,8 @@ class ProductVariantCompatibilityService
     public function validateSelection(
         ?string $compatibilityType,
         array $compatibilities,
-        string $path = 'vehicle_compatibilities'
+        string $path = 'vehicle_compatibilities',
+        bool $requiresOem = false,
     ): void {
         if (
             $compatibilityType === Product::COMPATIBILITY_TYPE_VEHICLE_SPECIFIC
@@ -27,7 +28,14 @@ class ProductVariantCompatibilityService
         }
 
         foreach ($compatibilities as $index => $compatibility) {
-            $this->validateCompatibility($compatibility, "{$path}.{$index}");
+            if ($requiresOem) {
+                foreach (PublicVehicleCompatibility::KEYS as $key) {
+                    if (empty($compatibility[$key])) {
+                        throw ValidationException::withMessages(["{$path}.{$index}.{$key}" => 'Esta categoría requiere marca, modelo, generación y sistema OEM en cada compatibilidad de variante.']);
+                    }
+                }
+            }
+            $this->validateCompatibility($compatibility, "{$path}.{$index}", $requiresOem);
         }
     }
 
@@ -48,7 +56,7 @@ class ProductVariantCompatibilityService
         );
     }
 
-    private function validateCompatibility(array $compatibility, string $path): void
+    private function validateCompatibility(array $compatibility, string $path, bool $requiresOem = false): void
     {
         $brandId = (int) ($compatibility['vehicle_brand_id'] ?? 0);
         $modelId = $compatibility['vehicle_model_id'] ?? null;
@@ -78,6 +86,9 @@ class ProductVariantCompatibilityService
         }
 
         $system = $systemId ? VehicleMultimediaSystem::find($systemId) : null;
+        if ($requiresOem && (! $system?->is_active || ! $model?->is_active || ! $version?->is_active)) {
+            throw ValidationException::withMessages(["{$path}.vehicle_multimedia_system_id" => 'Selecciona un sistema OEM, modelo y generación activos.']);
+        }
         if ($system && (int) $system->vehicle_brand_id !== $brandId) {
             throw ValidationException::withMessages([
                 "{$path}.vehicle_multimedia_system_id" => 'El sistema multimedia no pertenece a la marca del vehículo.',
@@ -115,7 +126,7 @@ class ProductVariantCompatibilityService
                 ]);
             }
 
-            if ($systemId && $version->multimediaSystems()->exists()) {
+            if ($systemId && ($requiresOem || $version->multimediaSystems()->exists())) {
                 $isRegistered = $version->multimediaSystems()
                     ->whereKey($systemId)
                     ->exists();

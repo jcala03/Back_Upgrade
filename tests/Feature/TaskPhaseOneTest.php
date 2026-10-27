@@ -13,6 +13,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
+use Tests\Support\CommercialAccess;
 use Tests\TestCase;
 
 class TaskPhaseOneTest extends TestCase
@@ -67,7 +68,7 @@ class TaskPhaseOneTest extends TestCase
         $user = User::factory()->create(['role' => User::ROLE_USER]);
         $this->assertTrue($admin->hasPermission('tasks.cancel'));
         $this->assertFalse($user->hasPermission('tasks.view'));
-        $this->assertSame(['notifications.view', 'notifications.update', 'business_overview.view'], $user->permissions());
+        $this->assertSame(CommercialAccess::DEFAULT_PERMISSIONS, $user->permissions());
         $this->assertContains(CrmNotification::TYPE_TASK_ASSIGNED, CrmNotification::types());
     }
 

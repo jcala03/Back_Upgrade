@@ -8,7 +8,10 @@ class ListMyCommercialProductsRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return (bool) $this->user()?->hasPermission('orders.create_own');
+        return (bool) ($this->user()?->hasPermission('inventory.view_own')
+            || $this->user()?->hasPermission('orders.create_own')
+            || $this->user()?->hasPermission('quotations.create_own')
+            || $this->user()?->hasPermission('quotations.update_own'));
     }
 
     public function rules(): array

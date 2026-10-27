@@ -27,7 +27,7 @@ class PublicProductResource extends JsonResource
             'product_brand_id' => $product->product_brand_id,
             'compatibility_type' => $product->compatibility_type,
             'sku' => $product->sku,
-            'price' => $product->price,
+            'price' => $product->public_price ?? $product->price,
             'stock' => $stock,
             'technical_specs' => $product->technical_specs,
             'main_image' => $product->main_image,
@@ -119,6 +119,7 @@ class PublicProductResource extends JsonResource
             'id' => $category->id,
             'name' => $category->name,
             'slug' => $category->slug,
+            'requires_oem_compatibility' => (bool) $category->requires_oem_compatibility,
             'description' => $category->description,
             'is_active' => $category->is_active,
             'fields' => $category->relationLoaded('fields')
