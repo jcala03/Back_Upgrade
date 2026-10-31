@@ -20,44 +20,21 @@ use App\Models\UserCapability;
 use App\Services\CommissionService;
 use App\Services\CrmNotificationService;
 use App\Services\OrderService;
-use Illuminate\Contracts\Console\Kernel;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use App\Services\PaymentService;
+use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Laravel\Sanctum\Sanctum;
 use LogicException;
 use Mockery;
 use RuntimeException;
+use Tests\Support\TracksCommissionQa;
 use Tests\TestCase;
 
 class CommissionLifecyclePhaseFourTest extends TestCase
 {
-    use RefreshDatabase;
+    use DatabaseTransactions, TracksCommissionQa;
 
     /** @var array<string, Branch> */
     private array $branches = [];
-
-    public function createApplication()
-    {
-        $connection = trim((string) getenv('TEST_DB_CONNECTION'));
-        $database = trim((string) getenv('TEST_DB_DATABASE'));
-
-        if ($connection !== 'mysql' || $database === '') {
-            throw new RuntimeException('CommissionLifecyclePhaseFourTest requiere TEST_DB_CONNECTION=mysql y TEST_DB_DATABASE explícita.');
-        }
-        if (strcasecmp($database, 'upgrade') === 0) {
-            throw new RuntimeException('CommissionLifecyclePhaseFourTest no puede ejecutarse contra la base principal upgrade.');
-        }
-
-        $app = require __DIR__.'/../../bootstrap/app.php';
-        $app->make(Kernel::class)->bootstrap();
-        $app['config']->set('database.default', $connection);
-        $app['config']->set("database.connections.{$connection}.database", $database);
-
-        if (strcasecmp((string) $app['config']->get("database.connections.{$connection}.database"), 'upgrade') === 0) {
-            throw new RuntimeException('La base configurada para CommissionLifecyclePhaseFourTest no puede ser upgrade.');
-        }
-
-        return $app;
-    }
 
     public function test_admin_direct_confirmation_generates_only_eligible_product_commission(): void
     {
@@ -80,7 +57,7 @@ class CommissionLifecyclePhaseFourTest extends TestCase
             ],
         ])->assertCreated()->assertJsonPath('data.status', Order::STATUS_CONFIRMED)->json('data.id');
 
-        $commission = EmployeeCommission::sole();
+        $commission = $this->newCommissions()->sole();
         $this->assertSame($seller->id, $commission->employee_id);
         $this->assertSame($branch->id, $commission->branch_id);
         $this->assertSame($orderId, $commission->order_id);
@@ -97,10 +74,10 @@ class CommissionLifecyclePhaseFourTest extends TestCase
             'branch_id' => $branch->id,
             'items' => [['product_id' => $eligible->id, 'quantity' => 1]],
         ])->assertCreated();
-        $this->assertDatabaseCount('employee_commissions', 1);
+        $this->assertNewDatabaseCount('employee_commissions', 1);
 
         $this->postJson("/api/admin/orders/{$orderId}/status", ['status' => Order::STATUS_CONFIRMED])->assertOk();
-        $this->assertDatabaseCount('employee_commissions', 1);
+        $this->assertNewDatabaseCount('employee_commissions', 1);
         $this->assertTrue($admin->hasPermission('commissions.view'));
     }
 
@@ -124,7 +101,7 @@ class CommissionLifecyclePhaseFourTest extends TestCase
             ],
         ])->assertCreated();
 
-        $this->assertDatabaseCount('employee_commissions', 2);
+        $this->assertNewDatabaseCount('employee_commissions', 2);
         $this->assertDatabaseHas('employee_commissions', [
             'product_id' => $simple->id,
             'product_variant_id' => null,
@@ -159,7 +136,7 @@ class CommissionLifecyclePhaseFourTest extends TestCase
         $orderId = $this->postJson('/api/my/sales', [
             'items' => [['product_id' => $product->id, 'quantity' => 2]],
         ])->assertCreated()->assertJsonPath('data.status', Order::STATUS_PENDING)->json('data.id');
-        $this->assertDatabaseCount('employee_commissions', 0);
+        $this->assertNewDatabaseCount('employee_commissions', 0);
         $product->update(['commission_amount' => 60000]);
 
         $this->postJson("/api/my/sales/{$orderId}/confirm")
@@ -238,7 +215,7 @@ class CommissionLifecyclePhaseFourTest extends TestCase
         $this->assertSame('SKU-NUEVO', $second->sku_snapshot);
     }
 
-    public function test_complete_earns_without_payment_notifies_once_and_is_idempotent(): void
+    public function test_complete_requires_payment_then_notifies_once_and_is_idempotent(): void
     {
         $admin = $this->admin();
         $branch = $this->branch();
@@ -248,16 +225,20 @@ class CommissionLifecyclePhaseFourTest extends TestCase
         $this->stock($branch, $product, 5);
         $orderId = $this->adminSale($branch, $seller, $product, 2);
 
-        $this->assertDatabaseCount('payments', 0);
+        $this->assertNewDatabaseCount('payments', 0);
         $this->postJson("/api/admin/orders/{$orderId}/status", ['status' => Order::STATUS_COMPLETED])
             ->assertOk()->assertJsonPath('data.status', Order::STATUS_COMPLETED);
 
         $order = Order::findOrFail($orderId);
         $commission = EmployeeCommission::where('order_id', $orderId)->firstOrFail();
+        $this->assertSame(EmployeeCommission::STATUS_PENDING, $commission->status);
+        $this->assertNull($commission->earned_at);
+        $this->postJson("/api/admin/orders/{$orderId}/payments", ['amount' => $order->total, 'method' => 'cash'])->assertCreated();
+        $commission->refresh();
         $this->assertSame(EmployeeCommission::STATUS_EARNED, $commission->status);
         $this->assertNotNull($commission->earned_at);
-        $this->assertSame($order->completed_at?->getTimestamp(), $commission->earned_at?->getTimestamp());
-        $this->assertDatabaseCount('payments', 0);
+        $this->assertTrue($commission->earned_at->gte($order->completed_at));
+        $this->assertNewDatabaseCount('payments', 1);
         $this->assertDatabaseHas('crm_notifications', [
             'user_id' => $recipient->id,
             'type' => CrmNotification::TYPE_COMMISSION_EARNED,
@@ -266,7 +247,7 @@ class CommissionLifecyclePhaseFourTest extends TestCase
             'reference_id' => $orderId,
             'dedupe_key' => "commission_earned:{$commission->id}",
         ]);
-        $notification = CrmNotification::where('user_id', $recipient->id)->sole();
+        $notification = CrmNotification::where('dedupe_key', "commission_earned:{$commission->id}")->sole();
         $this->assertSame([
             'commission_id' => $commission->id,
             'order_id' => $orderId,
@@ -283,8 +264,8 @@ class CommissionLifecyclePhaseFourTest extends TestCase
 
         Sanctum::actingAs($admin);
         $this->postJson("/api/admin/orders/{$orderId}/status", ['status' => Order::STATUS_COMPLETED])->assertOk();
-        $this->assertDatabaseCount('employee_commissions', 1);
-        $this->assertDatabaseCount('crm_notifications', 1);
+        $this->assertNewDatabaseCount('employee_commissions', 1);
+        $this->assertNewDatabaseCount('crm_notifications', 1);
         $this->assertSame($commission->earned_at?->getTimestamp(), $commission->fresh()->earned_at?->getTimestamp());
         $this->assertSame(100000, $commission->fresh()->amount);
     }
@@ -328,6 +309,7 @@ class CommissionLifecyclePhaseFourTest extends TestCase
         $this->assertSame(0, EmployeeCommission::where('order_id', $pendingOrder)->count());
 
         $secondOrder = $this->adminSale($branch, $seller, $product);
+        $this->payOrder($secondOrder);
         $this->postJson("/api/admin/orders/{$secondOrder}/status", ['status' => Order::STATUS_COMPLETED])->assertOk();
         $this->postJson("/api/admin/orders/{$secondOrder}/status", ['status' => Order::STATUS_CANCELLED])
             ->assertUnprocessable()->assertJsonValidationErrors('status');
@@ -394,7 +376,7 @@ class CommissionLifecyclePhaseFourTest extends TestCase
         app(CommissionService::class)->createPendingForOrder($order);
 
         $variant->delete();
-        $commission = EmployeeCommission::sole();
+        $commission = $this->newCommissions()->sole();
         $this->assertNull($commission->product_variant_id);
         $this->assertSame('Variante histórica', $commission->variant_name_snapshot);
         $this->assertSame('VAR-HIST', $commission->sku_snapshot);
@@ -443,8 +425,8 @@ class CommissionLifecyclePhaseFourTest extends TestCase
         $this->assertSame(Order::STATUS_PENDING, $order->fresh()->status);
         $this->assertNull($order->fresh()->stock_committed_at);
         $this->assertSame(4, $stock->fresh()->quantity);
-        $this->assertDatabaseCount('inventory_movements', 0);
-        $this->assertSame(1, EmployeeCommission::sole()->amount);
+        $this->assertNewDatabaseCount('inventory_movements', 0);
+        $this->assertSame(1, $this->newCommissions()->sole()->amount);
     }
 
     public function test_missing_linked_user_never_blocks_completion(): void
@@ -455,16 +437,18 @@ class CommissionLifecyclePhaseFourTest extends TestCase
         $product = $this->product(true, 50000);
         $this->stock($branch, $product, 5);
         $firstOrder = $this->adminSale($branch, $withoutUser, $product);
+        $this->payOrder($firstOrder);
         $this->postJson("/api/admin/orders/{$firstOrder}/status", ['status' => Order::STATUS_COMPLETED])->assertOk();
         $this->assertSame(EmployeeCommission::STATUS_EARNED, EmployeeCommission::where('order_id', $firstOrder)->value('status'));
-        $this->assertDatabaseCount('crm_notifications', 0);
+        $this->assertNewDatabaseCount('crm_notifications', 0);
 
         $inactiveUser = User::factory()->create(['role' => User::ROLE_USER, 'is_active' => false]);
         $inactiveRecipient = $this->employee($branch, 'Cuenta inactiva', $inactiveUser);
         $secondOrder = $this->adminSale($branch, $inactiveRecipient, $product);
+        $this->payOrder($secondOrder);
         $this->postJson("/api/admin/orders/{$secondOrder}/status", ['status' => Order::STATUS_COMPLETED])->assertOk();
         $this->assertSame(EmployeeCommission::STATUS_EARNED, EmployeeCommission::where('order_id', $secondOrder)->value('status'));
-        $this->assertDatabaseCount('crm_notifications', 0);
+        $this->assertNewDatabaseCount('crm_notifications', 0);
     }
 
     public function test_payment_after_operational_completion_does_not_repeat_stock_or_commission_side_effects(): void
@@ -494,9 +478,10 @@ class CommissionLifecyclePhaseFourTest extends TestCase
 
         $this->assertSame($stockAfterCompletion, $stock->fresh()->quantity);
         $this->assertSame($movementCount, InventoryMovement::where('reference_id', $orderId)->count());
-        $this->assertDatabaseCount('employee_commissions', 1);
+        $this->assertNewDatabaseCount('employee_commissions', 1);
         $this->assertSame(EmployeeCommission::STATUS_EARNED, $commission->fresh()->status);
-        $this->assertSame($earnedAt, $commission->fresh()->earned_at?->getTimestamp());
+        $this->assertNull($earnedAt);
+        $this->assertNotNull($commission->fresh()->earned_at);
         $this->assertSame(100000, $commission->fresh()->amount);
     }
 
@@ -513,12 +498,19 @@ class CommissionLifecyclePhaseFourTest extends TestCase
         $notifications->shouldReceive('createFor')->once()->andThrow(new RuntimeException('notification unavailable'));
         $this->app->instance(CrmNotificationService::class, $notifications);
         $secondOrder = $this->adminSale($branch, $seller, $product);
+        $this->payOrder($secondOrder);
 
         $this->postJson("/api/admin/orders/{$secondOrder}/status", ['status' => Order::STATUS_COMPLETED])
             ->assertOk()->assertJsonPath('data.status', Order::STATUS_COMPLETED);
         $this->assertSame(EmployeeCommission::STATUS_EARNED, EmployeeCommission::where('order_id', $secondOrder)->value('status'));
         $this->assertNotNull(Order::findOrFail($secondOrder)->completed_at);
-        $this->assertDatabaseCount('crm_notifications', 0);
+        $this->assertNewDatabaseCount('crm_notifications', 0);
+    }
+
+    private function payOrder(int $id): void
+    {
+        $order = Order::findOrFail($id);
+        app(PaymentService::class)->register($order, ['amount' => $order->total, 'method' => 'cash']);
     }
 
     private function admin(): User
@@ -532,7 +524,7 @@ class CommissionLifecyclePhaseFourTest extends TestCase
     private function branch(string $code = 'BAQ'): Branch
     {
         return $this->branches[$code] ??= Branch::create([
-            'code' => $code,
+            'code' => $code.'-'.substr(uniqid(), -6),
             'slug' => strtolower($code).'-'.uniqid(),
             'name' => "Sede {$code}",
             'city' => $code === 'BOG' ? 'Bogotá' : 'Barranquilla',

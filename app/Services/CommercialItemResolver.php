@@ -11,7 +11,10 @@ use Illuminate\Validation\ValidationException;
 
 class CommercialItemResolver
 {
-    public function __construct(private readonly ProductPricingService $pricing) {}
+    public function __construct(
+        private readonly ProductPricingService $pricing,
+        private readonly ProductConfigurationValidator $configurations,
+    ) {}
 
     /**
      * The third argument is retained temporarily for source compatibility.
@@ -129,7 +132,11 @@ class CommercialItemResolver
     private function resolveProductItem(array &$resolved, array $requestItem, bool $admin): void
     {
         [$product, $variant] = $this->resolveCatalogSelection($requestItem, $admin);
+        $context = $admin ? null : $this->configurations->snapshot($product, $variant, $requestItem);
         $key = 'product:'.$product->id.':'.($variant?->id ?? 'product');
+        if ($context !== null) {
+            $key .= ':'.hash('sha256', json_encode($context, JSON_THROW_ON_ERROR));
+        }
         $quantity = (int) $requestItem['quantity'];
         $existingQuantity = ($resolved[$key]['quantity'] ?? 0) + $quantity;
 
@@ -141,6 +148,7 @@ class CommercialItemResolver
 
         $resolved[$key] = [
             'item_type' => OrderItem::ITEM_TYPE_PRODUCT,
+            ...($context !== null ? ['configuration_context' => $context] : []),
             'product_id' => $product->id,
             'product_variant_id' => $variant?->id,
             'service_id' => null,

@@ -15,12 +15,12 @@ class OrderItem extends Model
     protected $fillable = [
         'order_id', 'item_type', 'product_id', 'product_variant_id', 'service_id',
         'product_name', 'product_slug', 'product_sku', 'variant_name', 'variant_sku',
-        'variant_specs', 'service_name', 'service_description', 'unit_price',
+        'variant_specs', 'configuration_context', 'service_name', 'service_description', 'unit_price',
         'unit_cost', 'quantity', 'subtotal', 'discount_amount', 'total',
     ];
 
     protected $casts = [
-        'variant_specs' => 'array', 'unit_price' => 'integer', 'unit_cost' => 'integer',
+        'variant_specs' => 'array', 'configuration_context' => 'array', 'unit_price' => 'integer', 'unit_cost' => 'integer',
         'quantity' => 'integer', 'subtotal' => 'integer', 'discount_amount' => 'integer',
         'total' => 'integer',
     ];

@@ -26,9 +26,14 @@ class CommissionController extends Controller
         return response()->json([
             'data' => [
                 'commissions' => $results,
-                'date_basis' => 'created_at',
+                'date_basis' => ($request->validated('date_basis') ?? 'created_at'),
             ],
         ]);
+    }
+
+    public function summary(ListAdminCommissionsRequest $request): JsonResponse
+    {
+        return response()->json(['data' => $this->commissions->summary(null, $request->validated(), admin: true)]);
     }
 
     public function show(Request $request, EmployeeCommission $commission): JsonResponse

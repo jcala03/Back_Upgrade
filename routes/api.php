@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\BusinessSettingsController;
 use App\Http\Controllers\Api\CalendarController;
 use App\Http\Controllers\Api\CheckoutOrderController;
 use App\Http\Controllers\Api\CheckoutPaymentController;
+use App\Http\Controllers\Api\CommercialDocumentController;
 use App\Http\Controllers\Api\CommercialProductController;
 use App\Http\Controllers\Api\CommissionController;
 use App\Http\Controllers\Api\CrmNotificationController;
@@ -104,6 +105,19 @@ Route::post('/checkout/orders/{publicToken}/pickup', [CheckoutOrderController::c
 */
 
 Route::middleware(['auth:sanctum', EnsureUserIsActive::class])->group(function () {
+    // Existing CRM documents, never public links or alternative commercial records.
+    foreach ([
+        ['admin/quotations', 'quotation', 'admin'],
+        ['admin/orders', 'sale', 'admin'],
+        ['my/quotations', 'quotation', 'own'],
+        ['my/sales', 'sale', 'own'],
+    ] as [$prefix, $type, $scope]) {
+        foreach (['document' => 'preview', 'pdf' => 'download', 'email' => 'email'] as $suffix => $action) {
+            Route::match($action === 'email' ? ['POST'] : ['GET'], $prefix.'/{document}/'.$suffix, [CommercialDocumentController::class, $action])
+                ->whereNumber('document')->defaults('document_type', $type)->defaults('document_scope', $scope)
+                ->middleware($action === 'email' ? 'throttle:5,1,commercial-document-email-' : 'throttle:30,1,commercial-document-read-');
+        }
+    }
     Route::get('/auth/me', [AuthController::class, 'me']);
     Route::prefix('push')->middleware('throttle:60,1')->group(function () {
         Route::get('/config', [PushSubscriptionController::class, 'config']);
@@ -158,6 +172,7 @@ Route::middleware(['auth:sanctum', EnsureUserIsActive::class])->group(function (
         Route::get('/calendar', [CalendarController::class, 'index']);
 
         Route::get('/commissions', [CommissionController::class, 'index']);
+        Route::get('/commissions/summary', [CommissionController::class, 'summary']);
         Route::get('/commissions/{commission}', [CommissionController::class, 'show']);
 
         Route::get('/payment-reconciliations', [PaymentReconciliationController::class, 'index']);
@@ -345,7 +360,7 @@ Route::middleware(['auth:sanctum', EnsureUserIsActive::class])->group(function (
 
         /*
         |--------------------------------------------------------------------------
-        | Inventory
+        | Inventoriop
         |--------------------------------------------------------------------------
         */
 
@@ -364,7 +379,7 @@ Route::middleware(['auth:sanctum', EnsureUserIsActive::class])->group(function (
 
         /*
         |--------------------------------------------------------------------------
-        | Orders
+        | Aqui todo lo q tiene que ver con ordenes
         |--------------------------------------------------------------------------
         */
 
@@ -407,7 +422,7 @@ Route::middleware(['auth:sanctum', EnsureUserIsActive::class])->group(function (
 
         /*
         |--------------------------------------------------------------------------
-        | Notifications
+        | Esta vaina aqui es notificaciones
         |--------------------------------------------------------------------------
         */
 

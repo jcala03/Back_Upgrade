@@ -61,20 +61,22 @@ class ProductCategoryController extends Controller
 
         $validated = $this->validateCategory($request);
 
-        $category = ProductCategory::create([
-            'name' => $validated['name'],
-            'slug' => $this->generateUniqueSlug($validated['name']),
-            'description' => $validated['description'] ?? null,
-            'requires_oem_compatibility' => $validated['requires_oem_compatibility'] ?? false,
-            'is_active' => $request->boolean('is_active', true),
-        ]);
+        return DB::transaction(function () use ($validated, $request) {
+            $category = ProductCategory::create([
+                'name' => $validated['name'],
+                'slug' => $this->generateUniqueSlug($validated['name']),
+                'description' => $validated['description'] ?? null,
+                'requires_oem_compatibility' => $validated['requires_oem_compatibility'] ?? false,
+                'is_active' => $request->boolean('is_active', true),
+            ]);
 
-        $this->syncFields($category, $validated['fields'] ?? null);
+            $this->syncFields($category, $validated['fields'] ?? null);
 
-        return response()->json([
-            'message' => 'Categoría creada correctamente.',
-            'data' => $category->fresh()->load('fields'),
-        ], 201);
+            return response()->json([
+                'message' => 'Categoría creada correctamente.',
+                'data' => $category->fresh()->load('fields'),
+            ], 201);
+        });
     }
 
     public function update(Request $request, ProductCategory $productCategory): JsonResponse
@@ -83,24 +85,27 @@ class ProductCategoryController extends Controller
 
         $validated = $this->validateCategory($request, $productCategory);
 
-        $newSlug = $productCategory->name !== $validated['name']
-            ? $this->generateUniqueSlug($validated['name'], $productCategory->id)
-            : $productCategory->slug;
+        return DB::transaction(function () use ($validated, $request, $productCategory) {
+            $productCategory = ProductCategory::whereKey($productCategory->id)->lockForUpdate()->firstOrFail();
+            $newSlug = $productCategory->name !== $validated['name']
+                ? $this->generateUniqueSlug($validated['name'], $productCategory->id)
+                : $productCategory->slug;
 
-        $productCategory->update([
-            'name' => $validated['name'],
-            'slug' => $newSlug,
-            'description' => $validated['description'] ?? null,
-            'requires_oem_compatibility' => $validated['requires_oem_compatibility'] ?? $productCategory->requires_oem_compatibility,
-            'is_active' => $request->boolean('is_active', true),
-        ]);
+            $productCategory->update([
+                'name' => $validated['name'],
+                'slug' => $newSlug,
+                'description' => $validated['description'] ?? null,
+                'requires_oem_compatibility' => $validated['requires_oem_compatibility'] ?? $productCategory->requires_oem_compatibility,
+                'is_active' => $request->boolean('is_active', true),
+            ]);
 
-        $this->syncFields($productCategory, $validated['fields'] ?? null);
+            $this->syncFields($productCategory, $validated['fields'] ?? null, $validated['replace_fields'] ?? false);
 
-        return response()->json([
-            'message' => 'Categoría actualizada correctamente.',
-            'data' => $productCategory->fresh()->load('fields'),
-        ]);
+            return response()->json([
+                'message' => 'Categoría actualizada correctamente.',
+                'data' => $productCategory->fresh()->load('fields'),
+            ]);
+        });
     }
 
     public function destroy(Request $request, ProductCategory $productCategory): JsonResponse
@@ -148,6 +153,7 @@ class ProductCategoryController extends Controller
             'requires_oem_compatibility' => ['sometimes', 'boolean'],
 
             'fields' => ['nullable', 'array'],
+            'replace_fields' => ['sometimes', 'boolean'],
             'fields.*.id' => ['nullable', 'integer'],
             'fields.*.name' => ['required', 'string', 'max:120'],
             'fields.*.type' => ['required', 'string', Rule::in(ProductCategoryField::types())],
@@ -163,7 +169,7 @@ class ProductCategoryController extends Controller
         ]);
     }
 
-    private function syncFields(ProductCategory $category, ?array $fields): void
+    private function syncFields(ProductCategory $category, ?array $fields, bool $replace = false): void
     {
         if ($fields === null) {
             return;
@@ -182,12 +188,27 @@ class ProductCategoryController extends Controller
             $deleteQuery->whereNotIn('id', $incomingIds);
         }
 
-        $deleteQuery->delete();
+        // Partial lists merge by default; the canonical CRM list opts into replacement.
+        if ($replace) {
+            if ((clone $deleteQuery)->where(fn ($query) => $query->whereHas('specValues')
+                ->orWhereHas('variantSpecValues'))->exists()) {
+                throw ValidationException::withMessages(['fields' => 'No puedes omitir/eliminar campos con especificaciones guardadas. Consérvalos o desactívalos.']);
+            }
+            $deleteQuery->delete();
+        }
 
         foreach ($fields as $index => $fieldData) {
             $field = isset($fieldData['id'])
                 ? $category->fields()->whereKey($fieldData['id'])->first()
                 : null;
+
+            if (isset($fieldData['id']) && ! $field) {
+                throw ValidationException::withMessages(["fields.{$index}.id" => 'El campo no pertenece a esta categoría.']);
+            }
+            if ($field && ($field->specValues()->exists() || $field->variantSpecValues()->exists())
+                && ($field->type !== $fieldData['type'] || $field->scope !== ($fieldData['scope'] ?? $field->scope))) {
+                throw ValidationException::withMessages(["fields.{$index}" => 'No puedes cambiar el tipo o scope de un campo con valores históricos.']);
+            }
 
             $type = $fieldData['type'];
             $options = $this->sanitizeFieldOptions($type, $fieldData['options'] ?? []);
@@ -196,14 +217,14 @@ class ProductCategoryController extends Controller
                 'name' => $fieldData['name'],
                 'field_key' => $field?->field_key ?? $this->generateUniqueFieldKey($category, $fieldData['name']),
                 'type' => $type,
-                'scope' => $fieldData['scope'] ?? ProductCategoryField::SCOPE_PRODUCT,
+                'scope' => $fieldData['scope'] ?? $field?->scope ?? ProductCategoryField::SCOPE_PRODUCT,
                 'options' => $options,
-                'is_required' => filter_var($fieldData['is_required'] ?? false, FILTER_VALIDATE_BOOLEAN),
-                'is_active' => filter_var($fieldData['is_active'] ?? true, FILTER_VALIDATE_BOOLEAN),
-                'is_filterable' => filter_var($fieldData['is_filterable'] ?? false, FILTER_VALIDATE_BOOLEAN),
-                'filter_label' => $fieldData['filter_label'] ?? null,
-                'filter_unit' => $fieldData['filter_unit'] ?? null,
-                'sort_order' => $fieldData['sort_order'] ?? $index + 1,
+                'is_required' => filter_var($fieldData['is_required'] ?? $field?->is_required ?? false, FILTER_VALIDATE_BOOLEAN),
+                'is_active' => filter_var($fieldData['is_active'] ?? $field?->is_active ?? true, FILTER_VALIDATE_BOOLEAN),
+                'is_filterable' => filter_var($fieldData['is_filterable'] ?? $field?->is_filterable ?? false, FILTER_VALIDATE_BOOLEAN),
+                'filter_label' => $fieldData['filter_label'] ?? $field?->filter_label,
+                'filter_unit' => $fieldData['filter_unit'] ?? $field?->filter_unit,
+                'sort_order' => $fieldData['sort_order'] ?? $field?->sort_order ?? $index + 1,
             ];
 
             if ($field) {

@@ -7,6 +7,8 @@ use App\Models\Employee;
 use App\Models\EmployeeCommission;
 use App\Models\Order;
 use App\Models\OrderItem;
+use App\Models\Payment;
+use App\Models\PaymentReconciliationReview;
 use App\Models\Product;
 use App\Models\User;
 use App\Support\Business\BusinessContext;
@@ -122,11 +124,13 @@ class CommissionService
      */
     public function earnForOrder(Order $order, ?CarbonInterface $earnedAt = null): Collection
     {
-        if ($order->status !== Order::STATUS_COMPLETED) {
-            throw new LogicException('Commissions can only be earned by a completed order.');
-        }
-
         $commissions = DB::transaction(function () use ($order, $earnedAt): Collection {
+            // Serialize completion, later payments and retries on the same order.
+            // Never trust a stale caller's payment_status or total.
+            $order = Order::query()->lockForUpdate()->findOrFail($order->id);
+            if (! $this->fullyPaidAndCompleted($order)) {
+                return new Collection;
+            }
             $commissions = EmployeeCommission::query()
                 ->where('order_id', $order->id)
                 ->where('status', EmployeeCommission::STATUS_PENDING)
@@ -148,6 +152,31 @@ class CommissionService
         $this->notifyEarned($commissions);
 
         return $commissions;
+    }
+
+    private function fullyPaidAndCompleted(Order $order): bool
+    {
+        if ($order->status !== Order::STATUS_COMPLETED
+            || $order->payment_status !== Order::PAYMENT_PAID
+            || (int) $order->total <= 0
+            || $order->reconciliationReviews()->where('state', '!=', PaymentReconciliationReview::STATE_RESOLVED)->exists()
+            || $order->payments()->whereNotNull('reconciliation_required_at')->exists()
+            || $order->payments()->whereHas('reconciliationReviews', fn (Builder $reviews) => $reviews
+                ->where('state', '!=', PaymentReconciliationReview::STATE_RESOLVED))->exists()) {
+            return false;
+        }
+
+        // Bounded subtraction avoids integer overflow. No payment row joins that
+        // could count a credit twice, and no provider calls or state changes.
+        $remaining = (int) $order->total;
+        foreach ($order->payments()->where('status', Payment::STATUS_COMPLETED)->get() as $payment) {
+            if ($payment->currency !== $order->currency || (int) $payment->amount <= 0) {
+                return false;
+            }
+            $remaining -= min($remaining, (int) $payment->amount);
+        }
+
+        return $remaining === 0;
     }
 
     /**
@@ -189,6 +218,17 @@ class CommissionService
 
     public function paginateAdmin(array $filters): LengthAwarePaginator
     {
+        return $this->adminQuery($filters)
+            ->withExists($this->reviewRelation())
+            ->with($this->relations())
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
+            ->paginate(min((int) ($filters['per_page'] ?? 25), 100))
+            ->withQueryString();
+    }
+
+    private function adminQuery(array $filters): Builder
+    {
         return $this->applyListFilters(EmployeeCommission::query(), $filters)
             ->when($filters['employee_id'] ?? null, fn (Builder $query, $value) => $query->where('employee_id', $value))
             ->when($filters['branch_id'] ?? null, fn (Builder $query, $value) => $query->where('branch_id', $value))
@@ -203,12 +243,7 @@ class CommissionService
                         ->orWhereHas('order', fn (Builder $order) => $order->where('order_number', 'like', $term))
                         ->orWhereHas('employee', fn (Builder $employee) => $employee->where('name', 'like', $term));
                 });
-            })
-            ->with($this->relations())
-            ->orderByDesc('created_at')
-            ->orderByDesc('id')
-            ->paginate(min((int) ($filters['per_page'] ?? 25), 100))
-            ->withQueryString();
+            });
     }
 
     public function paginateForEmployee(Employee $employee, array $filters): LengthAwarePaginator
@@ -217,6 +252,7 @@ class CommissionService
             EmployeeCommission::query()->where('employee_id', $employee->id),
             $filters,
         )
+            ->withExists($this->reviewRelation())
             ->with($this->relations())
             ->orderByDesc('created_at')
             ->orderByDesc('id')
@@ -226,7 +262,113 @@ class CommissionService
 
     public function load(EmployeeCommission $commission): EmployeeCommission
     {
-        return $commission->load($this->relations());
+        return $commission->load($this->relations())->loadExists($this->reviewRelation());
+    }
+
+    /** Gross historical earnings remain intact; this is a review flag, not a reversal. */
+    private function reviewRelation(): array
+    {
+        return ['order as financial_review_required' => fn (Builder $order) => $order
+            ->where(function (Builder $risk): void {
+                $risk->where('payment_status', '!=', Order::PAYMENT_PAID)
+                    ->orWhere('status', '!=', Order::STATUS_COMPLETED)
+                    ->orWhereHas('payments', fn (Builder $payments) => $payments
+                        ->where('status', Payment::STATUS_REFUNDED)
+                        ->orWhereNotNull('reconciliation_required_at')
+                        ->orWhereHas('reconciliationReviews', fn (Builder $reviews) => $reviews
+                            ->where('state', '!=', PaymentReconciliationReview::STATE_RESOLVED)))
+                    ->orWhereHas('reconciliationReviews', fn (Builder $reviews) => $reviews
+                        ->where('state', '!=', PaymentReconciliationReview::STATE_RESOLVED));
+            })];
+    }
+
+    public function summary(?Employee $employee, array $filters = [], bool $admin = false): array
+    {
+        // Keep totals and seller breakdown in the same database read snapshot.
+        return DB::transaction(fn () => $this->summarySnapshot($employee, $filters, $admin));
+    }
+
+    private function summarySnapshot(?Employee $employee, array $filters, bool $admin): array
+    {
+        $filters = $this->periodFilters($filters);
+        $query = $admin ? $this->adminQuery($filters) : $this->applyListFilters(
+            EmployeeCommission::query()->where('employee_id', $employee?->id ?? 0), $filters,
+        );
+        $totals = $this->aggregate(clone $query);
+        $byEmployee = [];
+        if ($admin) {
+            $groups = $this->aggregateQuery(clone $query)->addSelect('employee_id')->groupBy('employee_id')->get();
+            $employees = Employee::query()->whereIn('id', $groups->pluck('employee_id'))->pluck('name', 'id');
+            $reviews = $this->reviewQuery(clone $query)->selectRaw('employee_id, SUM(amount) AS review_amount')
+                ->groupBy('employee_id')->pluck('review_amount', 'employee_id');
+            foreach ($groups as $group) {
+                $byEmployee[] = [
+                    'employee' => ['id' => (int) $group->employee_id, 'name' => $employees[$group->employee_id] ?? 'Vendedor histórico'],
+                    ...$this->integerTotals($group),
+                    'review_amount' => (int) ($reviews[$group->employee_id] ?? 0),
+                ];
+            }
+        }
+
+        return [
+            'period' => ['from' => $filters['date_from'], 'to' => $filters['date_to'], 'timezone' => BusinessContext::TIMEZONE],
+            // Retained for legacy consumers. New consumers use the period-neutral key.
+            'current_month' => $totals,
+            'totals' => $totals,
+            'by_employee' => $byEmployee,
+            'date_basis' => ['pending' => 'created_at', 'earned' => 'earned_at', 'voided' => 'voided_at'],
+        ];
+    }
+
+    private function periodFilters(array $filters): array
+    {
+        $month = BusinessContext::now()->startOfMonth();
+
+        return [...$filters, 'date_basis' => 'event',
+            'date_from' => $filters['date_from'] ?? $month->toDateString(),
+            'date_to' => $filters['date_to'] ?? $month->endOfMonth()->toDateString()];
+    }
+
+    private function eventPeriod(Builder $query, string $from, string $until): Builder
+    {
+        return $query->where(function (Builder $events) use ($from, $until): void {
+            foreach (['pending' => 'created_at', 'earned' => 'earned_at', 'voided' => 'voided_at'] as $status => $date) {
+                $events->orWhere(fn (Builder $event) => $event->where('status', $status)->where($date, '>=', $from)->where($date, '<', $until));
+            }
+        });
+    }
+
+    private function aggregateQuery(Builder $query): Builder
+    {
+        foreach (['pending', 'earned', 'voided'] as $status) {
+            $query->selectRaw('COALESCE(SUM(CASE WHEN status = ? THEN amount ELSE 0 END), 0) AS '.$status.'_amount', [$status]);
+        }
+
+        return $query->selectRaw('COALESCE(SUM(CASE WHEN status = ? THEN quantity ELSE 0 END), 0) AS earned_units', ['earned'])
+            ->selectRaw('COUNT(*) AS total_rows, COALESCE(SUM(quantity), 0) AS total_units, COUNT(DISTINCT order_id) AS sales_count');
+    }
+
+    private function integerTotals($row): array
+    {
+        $totals = [];
+        foreach (['pending_amount', 'earned_amount', 'voided_amount', 'earned_units', 'total_rows', 'total_units', 'sales_count'] as $field) {
+            $totals[$field] = (int) ($row?->$field ?? 0);
+        }
+
+        return $totals;
+    }
+
+    private function reviewQuery(Builder $query): Builder
+    {
+        $relation = $this->reviewRelation();
+
+        return $query->where('status', EmployeeCommission::STATUS_EARNED)->whereHas('order', reset($relation));
+    }
+
+    private function aggregate(Builder $query): array
+    {
+        return [...$this->integerTotals($this->aggregateQuery(clone $query)->first()),
+            'review_amount' => (int) $this->reviewQuery(clone $query)->sum('amount')];
     }
 
     /**
@@ -237,40 +379,10 @@ class CommissionService
      */
     public function currentMonthSummary(?Employee $employee): array
     {
-        $month = BusinessContext::now()->startOfMonth();
-        $nextMonth = $month->addMonth();
-        $fromUtc = $month->utc()->toDateTimeString();
-        $untilUtc = $nextMonth->utc()->toDateTimeString();
-
-        $totals = $this->summaryForPeriod($employee, $fromUtc, $untilUtc);
-
-        return [
-            'period' => [
-                'from' => $month->toDateString(),
-                'to' => $nextMonth->subDay()->toDateString(),
-                'timezone' => BusinessContext::TIMEZONE,
-            ],
-            'current_month' => [
-                'pending_amount' => $totals['pending_amount'],
-                'earned_amount' => $totals['earned_amount'],
-                'voided_amount' => $totals['voided_amount'],
-                'total_rows' => $totals['total_rows'],
-                'total_units' => $totals['total_units'],
-            ],
-            'date_basis' => [
-                'pending' => 'created_at',
-                'earned' => 'earned_at',
-                'voided' => 'voided_at',
-            ],
-        ];
+        return $this->summary($employee);
     }
 
-    /**
-     * Summarize immutable ledger events for one employee and a UTC half-open period.
-     * Pending uses created_at, earned uses earned_at, and voided uses voided_at.
-     *
-     * @return array{pending_amount: int, earned_amount: int, voided_amount: int, earned_units: int, total_rows: int, total_units: int}
-     */
+    /** Event summary used by the existing personal business overview. */
     public function summaryForPeriod(
         ?Employee $employee,
         CarbonInterface|string $fromUtc,
@@ -279,60 +391,23 @@ class CommissionService
         $from = $fromUtc instanceof CarbonInterface ? $fromUtc->toDateTimeString() : $fromUtc;
         $until = $untilUtc instanceof CarbonInterface ? $untilUtc->toDateTimeString() : $untilUtc;
 
-        $totals = EmployeeCommission::query()
-            ->where('employee_id', $employee?->id ?? 0)
-            ->where(function (Builder $query) use ($from, $until): void {
-                $query->where(function (Builder $pending) use ($from, $until): void {
-                    $pending->where('status', EmployeeCommission::STATUS_PENDING)
-                        ->where('created_at', '>=', $from)
-                        ->where('created_at', '<', $until);
-                })->orWhere(function (Builder $earned) use ($from, $until): void {
-                    $earned->where('status', EmployeeCommission::STATUS_EARNED)
-                        ->where('earned_at', '>=', $from)
-                        ->where('earned_at', '<', $until);
-                })->orWhere(function (Builder $voided) use ($from, $until): void {
-                    $voided->where('status', EmployeeCommission::STATUS_VOIDED)
-                        ->where('voided_at', '>=', $from)
-                        ->where('voided_at', '<', $until);
-                });
-            })
-            ->selectRaw(
-                'COALESCE(SUM(CASE WHEN status = ? AND created_at >= ? AND created_at < ? THEN amount ELSE 0 END), 0) AS pending_amount',
-                [EmployeeCommission::STATUS_PENDING, $from, $until],
-            )
-            ->selectRaw(
-                'COALESCE(SUM(CASE WHEN status = ? AND earned_at >= ? AND earned_at < ? THEN amount ELSE 0 END), 0) AS earned_amount',
-                [EmployeeCommission::STATUS_EARNED, $from, $until],
-            )
-            ->selectRaw(
-                'COALESCE(SUM(CASE WHEN status = ? AND voided_at >= ? AND voided_at < ? THEN amount ELSE 0 END), 0) AS voided_amount',
-                [EmployeeCommission::STATUS_VOIDED, $from, $until],
-            )
-            ->selectRaw(
-                'COALESCE(SUM(CASE WHEN status = ? AND earned_at >= ? AND earned_at < ? THEN quantity ELSE 0 END), 0) AS earned_units',
-                [EmployeeCommission::STATUS_EARNED, $from, $until],
-            )
-            ->selectRaw('COALESCE(SUM(quantity), 0) AS total_units')
-            ->selectRaw('COUNT(*) AS total_rows')
-            ->first();
-
-        return [
-            'pending_amount' => (int) ($totals?->pending_amount ?? 0),
-            'earned_amount' => (int) ($totals?->earned_amount ?? 0),
-            'voided_amount' => (int) ($totals?->voided_amount ?? 0),
-            'earned_units' => (int) ($totals?->earned_units ?? 0),
-            'total_rows' => (int) ($totals?->total_rows ?? 0),
-            'total_units' => (int) ($totals?->total_units ?? 0),
-        ];
+        return $this->aggregate($this->eventPeriod(
+            EmployeeCommission::query()->where('employee_id', $employee?->id ?? 0), $from, $until,
+        ));
     }
 
     private function applyListFilters(Builder $query, array $filters): Builder
     {
-        $query->when(
-            $filters['status'] ?? null,
-            fn (Builder $builder, $status) => $builder->where('status', $status),
-        );
+        $query->when($filters['status'] ?? null, fn (Builder $builder, $status) => $builder->where('status', $status));
+        if (($filters['date_basis'] ?? 'created_at') === 'event') {
+            $filters = $this->periodFilters($filters);
 
+            return $this->eventPeriod($query,
+                $this->businessDayStartUtc($filters['date_from'])->toDateTimeString(),
+                $this->businessDayStartUtc($filters['date_to'])->addDay()->toDateTimeString(),
+            );
+        }
+        // Preserve the legacy created_at API unless event dates are requested.
         if ($from = $filters['date_from'] ?? null) {
             $query->where('created_at', '>=', $this->businessDayStartUtc($from));
         }

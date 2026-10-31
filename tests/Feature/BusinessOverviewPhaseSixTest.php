@@ -64,7 +64,7 @@ class BusinessOverviewPhaseSixTest extends TestCase
         $this->assertTrue($user->hasPermission('notifications.update'));
         $this->assertTrue($user->hasPermission(UserCapability::ORDERS_VIEW_OWN));
         $this->assertTrue($user->hasPermission(UserCapability::QUOTATIONS_VIEW_OWN));
-        $this->assertFalse($user->hasPermission(UserCapability::COMMISSIONS_VIEW_OWN));
+        $this->assertTrue($user->hasPermission(UserCapability::COMMISSIONS_VIEW_OWN));
         $this->assertNotContains('business_overview.view', UserCapability::allowed());
         $this->assertNotContains('sales', User::roles());
 
@@ -214,7 +214,7 @@ class BusinessOverviewPhaseSixTest extends TestCase
             ->assertJsonPath('data.personal.quotations.quotation_count', 1)
             ->assertJsonPath('data.personal.quotations.converted_count', 1)
             ->assertJsonPath('data.personal.quotations.conversion_rate', 100)
-            ->assertJsonPath('data.personal.commissions.available', false)
+            ->assertJsonPath('data.personal.commissions.available', true)
             ->assertJsonMissingPath('data.company.sales_total')
             ->assertJsonMissingPath('data.company.revenue')
             ->assertJsonMissingPath('data.company.payments')

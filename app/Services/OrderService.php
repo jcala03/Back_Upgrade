@@ -37,6 +37,7 @@ class OrderService
         private readonly CommercialEmployeeContext $commercialContext,
         private readonly OrderTotalService $totals,
         private readonly EcommerceFulfillmentBranchResolver $fulfillment,
+        private readonly ProductConfigurationValidator $configurations,
     ) {}
 
     public function createPublic(array $data, ?string $publicTokenHash = null, ?string $idempotencyKey = null, ?string $idempotencyFingerprint = null): Order
@@ -112,6 +113,9 @@ class OrderService
     ): Order {
         return DB::transaction(function () use ($data, $origin, $user, $initialStatus, $admin, $branch, $seller, $publicResponse, $publicTokenHash, $idempotencyKey, $idempotencyFingerprint) {
             $resolvedItems = $this->items->resolve($data['items'], $admin, false);
+            if (! $admin) {
+                $this->configurations->validateAvailability($resolvedItems, $this->fulfillment);
+            }
             $subtotal = array_sum(array_column($resolvedItems, 'subtotal'));
             $discount = array_sum(array_column($resolvedItems, 'discount_amount'));
             $customer = isset($data['customer_id']) ? Customer::find($data['customer_id']) : null;
@@ -323,6 +327,7 @@ class OrderService
         if ($order->stock_committed_at) {
             return;
         }
+        $this->configurations->revalidateOrder($order);
 
         $branch = Branch::query()->find($order->branch_id);
         if (! $branch) {

@@ -17,6 +17,8 @@ use LogicException;
 
 class PaymentReconciliationResolutionService
 {
+    public function __construct(private readonly CommissionService $commissions) {}
+
     public const DECISION_REFUND_REQUIRED = 'refund_required';
 
     public const DECISION_REFUND_CONFIRMED_EXTERNALLY = 'refund_confirmed_externally';
@@ -78,6 +80,9 @@ class PaymentReconciliationResolutionService
             $lockedPayment = $review->payment_id === null
                 ? null
                 : Payment::query()->lockForUpdate()->findOrFail($review->payment_id);
+            // Payment → Order → Review matches provider reconciliation lock order.
+            $orderId = $lockedPayment?->order_id ?? $review->order_id;
+            $lockedOrder = $orderId === null ? null : Order::query()->lockForUpdate()->findOrFail($orderId);
             $locked = PaymentReconciliationReview::query()->lockForUpdate()->findOrFail($review->id);
             $this->authorize($actor);
             $normalized = [
@@ -125,6 +130,9 @@ class PaymentReconciliationResolutionService
 
             if ($terminal && $locked->payment_id !== null) {
                 $this->syncLegacyMarker($lockedPayment);
+            }
+            if ($terminal && $lockedOrder !== null) {
+                $this->commissions->earnForOrder($lockedOrder);
             }
 
             return ['review' => $locked->fresh(), 'action' => $action, 'replayed' => false];

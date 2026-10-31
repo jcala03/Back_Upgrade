@@ -31,6 +31,7 @@ class ListAdminCommissionsRequest extends FormRequest
             'employee_id' => ['nullable', 'integer', 'exists:employees,id'],
             'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
             'status' => ['nullable', Rule::in(EmployeeCommission::statuses())],
+            'date_basis' => ['nullable', Rule::in(['created_at', 'event'])],
             'order_id' => ['nullable', 'integer', 'exists:orders,id'],
             'product_id' => ['nullable', 'integer', 'exists:products,id'],
             'date_from' => ['nullable', 'date_format:Y-m-d'],

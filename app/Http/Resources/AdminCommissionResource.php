@@ -18,6 +18,7 @@ class AdminCommissionResource extends JsonResource
         return [
             'id' => $commission->id,
             'status' => $commission->status,
+            'requires_review' => $commission->status === 'earned' && (bool) $commission->financial_review_required,
             'employee' => $employee ? [
                 'id' => $employee->id,
                 'name' => $employee->name,

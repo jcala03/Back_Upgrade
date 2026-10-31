@@ -116,4 +116,10 @@ class PublicVehicleCompatibility
             });
         }
     }
+
+    /** Same-row predicate shared by public filtering and authoritative purchase validation. */
+    public static function matchRow(Builder $query, Request $request): void
+    {
+        self::row($query, $request, true);
+    }
 }

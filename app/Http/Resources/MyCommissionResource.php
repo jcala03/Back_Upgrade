@@ -17,6 +17,7 @@ class MyCommissionResource extends JsonResource
         return [
             'id' => $commission->id,
             'status' => $commission->status,
+            'requires_review' => $commission->status === 'earned' && (bool) $commission->financial_review_required,
             'branch' => $branch ? [
                 'id' => $branch->id,
                 'code' => $branch->code,

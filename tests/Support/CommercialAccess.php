@@ -12,7 +12,7 @@ final class CommercialAccess
         'quotations.view_own', 'quotations.create_own', 'quotations.update_own',
         'quotations.send_own', 'quotations.convert_own',
         'orders.view_own', 'orders.create_own', 'orders.confirm_own',
-        'orders.complete_own', 'payments.create_own',
+        'orders.complete_own', 'payments.create_own', 'commissions.view_own',
     ];
 
     /** Preserve negative authorization coverage independently of role defaults. */

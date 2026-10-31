@@ -13,9 +13,11 @@ class ProductVariantSpecValueService
     public function sync(ProductVariant $variant, array $specs): void
     {
         $fields = $this->variantFields($variant);
-        $this->validateSpecs($fields, $specs);
-
-        $variant->specValues()->delete();
+        // Omission is not deletion. Explicit null/empty clears only that field.
+        $existing = $variant->specValues()->with('field')->get()->mapWithKeys(fn ($row) => [
+            $row->field?->field_key => $row->value_number ?? $row->value_boolean ?? $row->value_text,
+        ])->only($fields->pluck('field_key')->all())->all();
+        $this->validateSpecs($fields, $specs, array_replace($existing, $specs));
 
         foreach ($fields as $field) {
             if (! array_key_exists($field->field_key, $specs)) {
@@ -25,15 +27,17 @@ class ProductVariantSpecValueService
             $value = $specs[$field->field_key];
 
             if ($value === null || $value === '') {
+                $variant->specValues()->where('product_category_field_id', $field->id)->delete();
+
                 continue;
             }
 
-            ProductVariantSpecValue::create([
+            ProductVariantSpecValue::updateOrCreate([
                 'product_variant_id' => $variant->id,
                 'product_category_field_id' => $field->id,
-                ...$this->buildValuePayload($field, $value),
-            ]);
+            ], $this->buildValuePayload($field, $value));
         }
+        $variant->unsetRelation('specValues');
     }
 
     private function variantFields(ProductVariant $variant): Collection
@@ -52,7 +56,7 @@ class ProductVariantSpecValueService
             ->get();
     }
 
-    private function validateSpecs(Collection $fields, array $specs): void
+    private function validateSpecs(Collection $fields, array $specs, array $merged): void
     {
         $fieldsByKey = $fields->keyBy('field_key');
 
@@ -62,6 +66,14 @@ class ProductVariantSpecValueService
             if (! $field) {
                 throw ValidationException::withMessages([
                     "specs.{$fieldKey}" => 'El campo no existe, está inactivo o no aplica a variantes.',
+                ]);
+            }
+
+            if (VariantMemoryAttributes::applies($field->productCategory)
+                && array_key_exists($fieldKey, VariantMemoryAttributes::FIELDS)
+                && $value !== null && $value !== '' && ! VariantMemoryAttributes::valid($value)) {
+                throw ValidationException::withMessages([
+                    "specs.{$fieldKey}" => 'Ingresa un número entero positivo en GB.',
                 ]);
             }
 
@@ -89,7 +101,7 @@ class ProductVariantSpecValueService
         }
 
         foreach ($fields->where('is_required', true) as $field) {
-            $value = $specs[$field->field_key] ?? null;
+            $value = $merged[$field->field_key] ?? null;
 
             if ($value === null || $value === '') {
                 throw ValidationException::withMessages([

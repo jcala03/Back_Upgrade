@@ -99,9 +99,11 @@ class OrderSalesPhaseOneTest extends TestCase
         ], array_keys($data));
         $this->assertSame([
             'id', 'item_type', 'product_id', 'product_variant_id', 'product_name', 'product_slug',
-            'product_sku', 'variant_name', 'variant_sku', 'variant_specs', 'quantity', 'unit_price',
+            'product_sku', 'variant_name', 'variant_sku', 'variant_specs', 'configuration_context', 'quantity', 'unit_price',
             'subtotal', 'discount_amount', 'total',
         ], array_keys($item));
+        // Additive public snapshot: historical/traditional purchases have no configuration.
+        $this->assertNull($item['configuration_context']);
 
         foreach (['branch_id', 'created_by', 'customer_id', 'customer_notes', 'payment_provider', 'payment_reference', 'payments', 'product', 'product_variant'] as $field) {
             $this->assertArrayNotHasKey($field, $data);

@@ -16,6 +16,7 @@ class PaymentService
     public function __construct(
         private readonly CrmNotificationService $notifications,
         private readonly CommercialEmployeeContext $commercialContext,
+        private readonly CommissionService $commissions,
     ) {}
 
     public function register(Order $order, array $data, ?User $user = null): Payment
@@ -117,6 +118,7 @@ class PaymentService
             'created_by' => $user?->id,
         ]);
         $this->recalculate($order);
+        $this->commissions->earnForOrder($order);
 
         return $payment;
     }

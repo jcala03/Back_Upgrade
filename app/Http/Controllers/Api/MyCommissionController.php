@@ -22,7 +22,7 @@ class MyCommissionController extends Controller
                 'data' => [
                     'employee_linked' => false,
                     'commissions' => [],
-                    'date_basis' => 'created_at',
+                    'date_basis' => ($request->validated('date_basis') ?? 'created_at'),
                 ],
             ]);
         }
@@ -38,7 +38,7 @@ class MyCommissionController extends Controller
             'data' => [
                 'employee_linked' => true,
                 'commissions' => $results,
-                'date_basis' => 'created_at',
+                'date_basis' => ($request->validated('date_basis') ?? 'created_at'),
             ],
         ]);
     }
@@ -50,7 +50,7 @@ class MyCommissionController extends Controller
         return response()->json([
             'data' => [
                 'employee_linked' => $employee !== null,
-                ...$this->commissions->currentMonthSummary($employee),
+                ...$this->commissions->summary($employee, $request->validated()),
             ],
         ]);
     }

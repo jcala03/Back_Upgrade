@@ -163,6 +163,7 @@ class User extends Authenticatable
                     UserCapability::ORDERS_CONFIRM_OWN,
                     UserCapability::ORDERS_COMPLETE_OWN,
                     UserCapability::PAYMENTS_CREATE_OWN,
+                    UserCapability::COMMISSIONS_VIEW_OWN,
                     ...$this->grantedCapabilities(),
                 ])),
             ],

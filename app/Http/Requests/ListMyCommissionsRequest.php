@@ -30,6 +30,7 @@ class ListMyCommissionsRequest extends FormRequest
     {
         return [
             'status' => ['nullable', Rule::in(EmployeeCommission::statuses())],
+            'date_basis' => ['nullable', Rule::in(['created_at', 'event'])],
             'date_from' => ['nullable', 'date_format:Y-m-d'],
             'date_to' => ['nullable', 'date_format:Y-m-d', 'after_or_equal:date_from'],
             'page' => ['nullable', 'integer', 'min:1'],

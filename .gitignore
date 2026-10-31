@@ -1,8 +1,7 @@
 *.log
 .DS_Store
-.env
-.env.backup
-.env.production
+.env*
+!.env.example
 .phpactor.json
 .phpunit.result.cache
 /.codex
@@ -32,3 +31,7 @@ Thumbs.db
 *.dump
 *.bak
 *.backup
+
+# Release/browser output is private or temporary, not application source.
+/qa-artifacts/
+/release-artifacts/

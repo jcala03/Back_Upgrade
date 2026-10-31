@@ -1,10 +1,24 @@
 name: Deploy Laravel - Upgrade La 79
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      release_sha:
+        description: 'Approved full commit SHA (must be the selected main commit)'
+        required: true
+        type: string
+      backup_id:
+        description: 'Verified private backup directory ID'
+        required: true
+        type: string
+      run_configuration_migration:
+        description: 'Explicitly authorize ONLY the configuration_context migration'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
 
 concurrency:
   group: production-deploy
@@ -13,9 +27,24 @@ concurrency:
 jobs:
   deploy:
     name: Deploy to Hostinger
+    if: github.ref == 'refs/heads/main'
+    environment: production
     runs-on: ubuntu-latest
+    env:
+      RELEASE_SHA: ${{ inputs.release_sha }}
+      WORKFLOW_SHA: ${{ github.sha }}
+      BACKUP_ID: ${{ inputs.backup_id }}
+      RUN_CONFIGURATION_MIGRATION: ${{ inputs.run_configuration_migration }}
 
     steps:
+      - name: Validate explicit release approval
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$RELEASE_SHA" = "$WORKFLOW_SHA"
+          [[ "$BACKUP_ID" =~ ^release-[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$ ]]
+
       - name: Deploy backend
         uses: appleboy/ssh-action@v1.2.2
         with:
@@ -24,8 +53,9 @@ jobs:
           password: ${{ secrets.HOSTINGER_PASSWORD }}
           port: 65002
           command_timeout: 15m
+          envs: RELEASE_SHA,BACKUP_ID,RUN_CONFIGURATION_MIGRATION
           script: |
-            set -e
+            set -eu
 
             PROJECT=/home/u497825029/domains/crmupgradecol.com/laravel
             PUBLIC=/home/u497825029/domains/crmupgradecol.com/public_html
@@ -37,8 +67,22 @@ jobs:
 
             cd "$PROJECT"
 
-            echo "== Actualizando código =="
-            git pull --ff-only origin main
+            echo "== Verificando respaldo y mantenimiento autorizados =="
+            BACKUP="$HOME/upgrade79-private-backups/$BACKUP_ID"
+            test -f "$BACKUP/RESTORE_VERIFIED"
+            test -f "$BACKUP/SHA256SUMS"
+            test "$(cat "$BACKUP/backend-head.txt")" = "$(git rev-parse HEAD)"
+            (cd "$BACKUP" && sha256sum --check --quiet SHA256SUMS)
+            test -f storage/framework/down
+            git diff --quiet
+            git diff --cached --quiet
+
+            echo "== Publicando exactamente el commit aprobado =="
+            git fetch origin main
+            git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+            git merge-base --is-ancestor HEAD "$RELEASE_SHA"
+            git -c advice.detachedHead=false checkout --detach "$RELEASE_SHA"
+            test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
 
             echo "== Instalando dependencias =="
             composer2 install \
@@ -46,6 +90,7 @@ jobs:
               --optimize-autoloader \
               --no-interaction \
               --no-scripts
+            composer2 check-platform-reqs --no-dev
 
             echo "== Registrando paquetes =="
             php artisan package:discover
@@ -53,8 +98,12 @@ jobs:
             echo "== Limpiando caché =="
             php artisan optimize:clear
 
-            echo "== Ejecutando migraciones =="
-            php artisan migrate --force
+            echo "== Verificando la única diferencia de esquema permitida =="
+            php ops/release-preflight.php
+            if [ "$RUN_CONFIGURATION_MIGRATION" = "true" ]; then
+              php artisan migrate --force --path=database/migrations/2026_10_28_000001_add_configuration_context_to_order_items.php
+            fi
+            php ops/release-preflight.php --require-current
 
             echo "== Actualizando archivos públicos =="
             cp -a public/. "$PUBLIC/"
@@ -82,5 +131,8 @@ jobs:
             # A process manager must start workers again after their current job.
             # This signal does not create a worker or configure Hostinger.
             php artisan queue:restart
+
+            php artisan up
+            test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
 
             echo "== Deploy completado correctamente =="

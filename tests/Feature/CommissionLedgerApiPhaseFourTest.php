@@ -13,46 +13,22 @@ use App\Models\UserCapability;
 use App\Services\CommissionService;
 use App\Support\Business\BusinessContext;
 use Carbon\CarbonImmutable;
-use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Database\QueryException;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Laravel\Sanctum\Sanctum;
 use LogicException;
-use RuntimeException;
+use Tests\Support\CommercialAccess;
+use Tests\Support\TracksCommissionQa;
 use Tests\TestCase;
 
 class CommissionLedgerApiPhaseFourTest extends TestCase
 {
-    use RefreshDatabase;
+    use DatabaseTransactions, TracksCommissionQa;
 
     protected function setUp(): void
     {
         parent::setUp();
         CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-08-24 12:00:00', BusinessContext::TIMEZONE));
-    }
-
-    public function createApplication()
-    {
-        $connection = trim((string) getenv('TEST_DB_CONNECTION'));
-        $database = trim((string) getenv('TEST_DB_DATABASE'));
-
-        if ($connection !== 'mysql' || $database === '') {
-            throw new RuntimeException('CommissionLedgerApiPhaseFourTest requiere TEST_DB_CONNECTION=mysql y TEST_DB_DATABASE explícita.');
-        }
-        if (strcasecmp($database, 'upgrade') === 0) {
-            throw new RuntimeException('CommissionLedgerApiPhaseFourTest no puede ejecutarse contra la base principal upgrade.');
-        }
-
-        $app = require __DIR__.'/../../bootstrap/app.php';
-        $app->make(Kernel::class)->bootstrap();
-        $app['config']->set('database.default', $connection);
-        $app['config']->set("database.connections.{$connection}.database", $database);
-
-        if (strcasecmp((string) $app['config']->get("database.connections.{$connection}.database"), 'upgrade') === 0) {
-            throw new RuntimeException('La base configurada para CommissionLedgerApiPhaseFourTest no puede ser upgrade.');
-        }
-
-        return $app;
     }
 
     protected function tearDown(): void
@@ -74,7 +50,7 @@ class CommissionLedgerApiPhaseFourTest extends TestCase
 
         $this->assertCount(1, $first);
         $this->assertCount(1, $second);
-        $this->assertDatabaseCount('employee_commissions', 1);
+        $this->assertNewDatabaseCount('employee_commissions', 1);
         $this->assertDatabaseHas('employee_commissions', [
             'employee_id' => $employee->id,
             'branch_id' => $branch->id,
@@ -88,7 +64,7 @@ class CommissionLedgerApiPhaseFourTest extends TestCase
         ]);
 
         $product->update(['commission_amount' => 60000, 'name' => 'Nombre nuevo']);
-        $commission = EmployeeCommission::firstOrFail();
+        $commission = $this->newCommissions()->firstOrFail();
         $this->assertSame(50000, $commission->unit_commission);
         $this->assertSame(100000, $commission->amount);
         $this->assertSame($item->product_name, $commission->product_name_snapshot);
@@ -107,7 +83,7 @@ class CommissionLedgerApiPhaseFourTest extends TestCase
         [$order] = $this->orderItem($employee, $branch, $product, 1);
         $service = app(CommissionService::class);
         $service->createPendingForOrder($order);
-        EmployeeCommission::query()->update(['amount' => 1]);
+        EmployeeCommission::where('order_id', $order->id)->update(['amount' => 1]);
 
         $this->expectException(LogicException::class);
         $service->createPendingForOrder($order);
@@ -120,7 +96,7 @@ class CommissionLedgerApiPhaseFourTest extends TestCase
         $product = $this->product(['commission_enabled' => true, 'commission_amount' => 50000]);
         [$order] = $this->orderItem($employee, $branch, $product);
         app(CommissionService::class)->createPendingForOrder($order);
-        $duplicate = EmployeeCommission::sole()->replicate();
+        $duplicate = $this->newCommissions()->sole()->replicate();
 
         $this->expectException(QueryException::class);
         $duplicate->save();
@@ -136,11 +112,11 @@ class CommissionLedgerApiPhaseFourTest extends TestCase
 
         $product->delete();
 
-        $commission = EmployeeCommission::firstOrFail();
+        $commission = $this->newCommissions()->firstOrFail();
         $this->assertNull($commission->product_id);
         $this->assertSame('Producto histórico', $commission->product_name_snapshot);
         $this->assertSame(50000, $commission->amount);
-        $this->assertDatabaseCount('employee_commissions', 1);
+        $this->assertNewDatabaseCount('employee_commissions', 1);
     }
 
     public function test_admin_commission_api_is_read_only_permissioned_filtered_and_paginated(): void
@@ -179,7 +155,7 @@ class CommissionLedgerApiPhaseFourTest extends TestCase
             ->assertJsonCount(1, 'data.commissions.data')
             ->assertJsonPath('data.commissions.data.0.id', $first->id)
             ->assertJsonPath('data.commissions.data.0.employee.name', 'María Comercial')
-            ->assertJsonPath('data.commissions.data.0.branch.code', 'BAQ')
+            ->assertJsonPath('data.commissions.data.0.branch.code', $branch->code)
             ->assertJsonPath('data.commissions.data.0.order.order_number', $first->order->order_number)
             ->assertJsonPath('data.commissions.data.0.product.name', 'Pantalla BMW')
             ->assertJsonMissingPath('data.commissions.data.0.employee.user')
@@ -200,15 +176,14 @@ class CommissionLedgerApiPhaseFourTest extends TestCase
     {
         $branch = $this->branch();
         $user = User::factory()->create(['role' => User::ROLE_USER, 'is_active' => true]);
-        Sanctum::actingAs($user);
+        $limited = CommercialAccess::limited($user, []);
+        $limited->setRelation('employee', null);
+        Sanctum::actingAs($limited);
         $this->getJson('/api/my/commissions')->assertForbidden();
         $this->getJson('/api/my/commissions/summary')->assertForbidden();
 
-        UserCapability::create([
-            'user_id' => $user->id,
-            'capability' => UserCapability::COMMISSIONS_VIEW_OWN,
-        ]);
-        $user->unsetRelation('capabilities');
+        $this->assertTrue($user->hasPermission(UserCapability::COMMISSIONS_VIEW_OWN));
+        Sanctum::actingAs($user);
         $this->getJson('/api/my/commissions')->assertOk()
             ->assertJsonPath('data.employee_linked', false)
             ->assertJsonPath('data.commissions', []);
@@ -234,7 +209,7 @@ class CommissionLedgerApiPhaseFourTest extends TestCase
             ->assertJsonPath('data.commissions.total', 1)
             ->assertJsonPath('data.commissions.data.0.id', $own->id)
             ->assertJsonPath('data.commissions.data.0.product.name', 'Pantalla propia')
-            ->assertJsonPath('data.commissions.data.0.branch.code', 'BAQ')
+            ->assertJsonPath('data.commissions.data.0.branch.code', $branch->code)
             ->assertJsonMissingPath('data.commissions.data.0.employee')
             ->assertJsonMissingPath('data.commissions.data.0.unit_cost')
             ->assertJsonMissingPath('data.commissions.data.0.margin')
@@ -301,7 +276,7 @@ class CommissionLedgerApiPhaseFourTest extends TestCase
     private function branch(string $code = 'BAQ'): Branch
     {
         return Branch::create([
-            'code' => $code,
+            'code' => $code.'-'.substr(uniqid(), -6),
             'slug' => strtolower($code).'-'.uniqid(),
             'name' => "Sede {$code}",
             'city' => 'Ciudad',

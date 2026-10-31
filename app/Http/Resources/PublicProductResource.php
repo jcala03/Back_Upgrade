@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources;
 
+use App\Services\ProductConfiguratorRegistry;
 use App\Support\Catalog\PublicProductStockQuery;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -21,6 +22,7 @@ class PublicProductResource extends JsonResource
             'id' => $product->id,
             'name' => $product->name,
             'slug' => $product->slug,
+            'configuration' => app(ProductConfiguratorRegistry::class)->registration($product),
             'description' => $product->description,
             'category' => $product->category,
             'category_id' => $product->category_id,
