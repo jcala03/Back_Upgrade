@@ -11,9 +11,18 @@ if (PHP_SAPI !== 'cli') {
 }
 
 try {
-    require __DIR__.'/../vendor/autoload.php';
+    $options = getopt('', ['project-root:', 'migration-root:', 'require-current']);
+    $project = realpath($options['project-root'] ?? __DIR__.'/..');
+    $migrationRoot = realpath($options['migration-root'] ?? __DIR__.'/../database/migrations');
+    if ($project === false || $migrationRoot === false
+        || ! is_file($project.'/vendor/autoload.php') || ! is_file($project.'/bootstrap/app.php')) {
+        throw new RuntimeException('Invalid installed project or candidate migration directory.');
+    }
+    // Inspect candidate migrations with the INSTALLED application's private configuration.
+    // This must run before checkout, Composer, maintenance or cache changes.
+    require $project.'/vendor/autoload.php';
     require __DIR__.'/ReleaseMigrationPlan.php';
-    $app = require __DIR__.'/../bootstrap/app.php';
+    $app = require $project.'/bootstrap/app.php';
     $app->bootstrapWith([LoadEnvironmentVariables::class, LoadConfiguration::class]);
     if (! $app->environment('production') || config('app.debug')
         || ! in_array(config('mail.default'), ['log', 'array'], true)
@@ -42,7 +51,7 @@ try {
         throw new RuntimeException('Effective database mismatch.');
     }
     $applied = $pdo->query('SELECT migration FROM migrations ORDER BY migration')->fetchAll(PDO::FETCH_COLUMN);
-    $files = array_map(fn ($file) => basename($file, '.php'), glob(__DIR__.'/../database/migrations/*.php'));
+    $files = array_map(fn ($file) => basename($file, '.php'), glob($migrationRoot.'/*.php'));
     sort($files);
     $columns = $pdo->query("SELECT IS_NULLABLE, DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'order_items' AND COLUMN_NAME = 'configuration_context'")->fetchAll(PDO::FETCH_ASSOC);
     $report = ReleaseMigrationPlan::verify($files, $applied, $columns, in_array('--require-current', $argv, true));

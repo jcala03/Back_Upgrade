@@ -1,18 +1,21 @@
 name: Deploy Laravel - Upgrade La 79
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       release_sha:
-        description: 'Approved full commit SHA (must be the selected main commit)'
-        required: true
+        description: 'Optional SHA confirmation; defaults to the selected main commit'
+        required: false
         type: string
       backup_id:
         description: 'Verified private backup directory ID'
-        required: true
+        required: false
         type: string
       run_configuration_migration:
-        description: 'Explicitly authorize ONLY the configuration_context migration'
+        description: 'MIGRATION ONLY: authorize the reviewed migration, not a code deployment'
         required: true
         default: false
         type: boolean
@@ -20,31 +23,70 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: production-deploy
   cancel-in-progress: false
+  queue: max
+
+env:
+  RELEASE_SHA: ${{ github.sha }}
+  REQUESTED_SHA: ${{ inputs.release_sha }}
+  BACKUP_ID: ${{ inputs.backup_id }}
+  RUN_CONFIGURATION_MIGRATION: ${{ inputs.run_configuration_migration || false }}
 
 jobs:
-  deploy:
-    name: Deploy to Hostinger
+  validate:
     if: github.ref == 'refs/heads/main'
-    environment: production
     runs-on: ubuntu-latest
-    env:
-      RELEASE_SHA: ${{ inputs.release_sha }}
-      WORKFLOW_SHA: ${{ github.sha }}
-      BACKUP_ID: ${{ inputs.backup_id }}
-      RUN_CONFIGURATION_MIGRATION: ${{ inputs.run_configuration_migration }}
-
     steps:
-      - name: Validate explicit release approval
+      - name: Validate event and optional migration authorization
         shell: bash
         run: |
           set -euo pipefail
           [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          test "$RELEASE_SHA" = "$WORKFLOW_SHA"
-          [[ "$BACKUP_ID" =~ ^release-[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$ ]]
+          if [ -n "$REQUESTED_SHA" ]; then test "$REQUESTED_SHA" = "$RELEASE_SHA"; fi
+          if [ -n "$BACKUP_ID" ]; then
+            [[ "$BACKUP_ID" =~ ^release-[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$ ]]
+          fi
+          if [ "$RUN_CONFIGURATION_MIGRATION" = "true" ]; then
+            test "$GITHUB_EVENT_NAME" = workflow_dispatch
+            test -n "$BACKUP_ID"
+          else
+            test "$RUN_CONFIGURATION_MIGRATION" = false
+          fi
 
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, dom, xml, xmlreader, curl, zip, gd, pdo_mysql
+          coverage: none
+          tools: composer:v2
+      - name: Validate locked dependencies and PHP
+        run: |
+          composer validate --strict --no-check-publish
+          composer install --prefer-dist --no-interaction --no-progress --no-scripts
+          composer audit --no-interaction
+          git ls-files -z '*.php' | xargs -0 -n1 php -l > /dev/null
+          bash -n ops/backup-production.sh
+          php vendor/bin/pint --test ops tests/Unit
+      - name: Unit tests without database or external payments
+        run: php vendor/bin/phpunit --no-configuration --bootstrap vendor/autoload.php --do-not-cache-result tests/Unit
+
+  deploy:
+    name: Deploy to Hostinger
+    needs: validate
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || !inputs.run_configuration_migration)
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Deploy backend
         uses: appleboy/ssh-action@v1.2.2
         with:
@@ -52,10 +94,16 @@ jobs:
           username: u497825029
           password: ${{ secrets.HOSTINGER_PASSWORD }}
           port: 65002
-          command_timeout: 15m
-          envs: RELEASE_SHA,BACKUP_ID,RUN_CONFIGURATION_MIGRATION
+          command_timeout: 30m
+          envs: RELEASE_SHA,BACKUP_ID
           script: |
-            set -eu
+            bash -se <<'UPGRADE79_REMOTE'
+            set -euo pipefail
+            export GIT_TERMINAL_PROMPT=0
+            umask 077
+            command -v flock > /dev/null
+            exec 9>"$HOME/.upgrade79-deploy.lock"
+            flock -w 900 9
 
             PROJECT=/home/u497825029/domains/crmupgradecol.com/laravel
             PUBLIC=/home/u497825029/domains/crmupgradecol.com/public_html
@@ -67,20 +115,39 @@ jobs:
 
             cd "$PROJECT"
 
-            echo "== Verificando respaldo y mantenimiento autorizados =="
-            BACKUP="$HOME/upgrade79-private-backups/$BACKUP_ID"
-            test -f "$BACKUP/RESTORE_VERIFIED"
-            test -f "$BACKUP/SHA256SUMS"
-            test "$(cat "$BACKUP/backend-head.txt")" = "$(git rev-parse HEAD)"
-            (cd "$BACKUP" && sha256sum --check --quiet SHA256SUMS)
-            test -f storage/framework/down
             git diff --quiet
             git diff --cached --quiet
-
-            echo "== Publicando exactamente el commit aprobado =="
             git fetch origin main
             git merge-base --is-ancestor "$RELEASE_SHA" origin/main
             git merge-base --is-ancestor HEAD "$RELEASE_SHA"
+            # Never silently rewrite or remove historical migration source.
+            git diff --name-status HEAD "$RELEASE_SHA" -- database/migrations |
+              awk '$1 != "A" { bad=1 } END { exit bad }'
+
+            echo "== Comprobando candidato sin cambiar el código publicado =="
+            install -d -m 700 "$HOME/upgrade79-deploy-candidates"
+            CANDIDATE=$(mktemp -d "$HOME/upgrade79-deploy-candidates/backend-$RELEASE_SHA-XXXXXX")
+            git archive "$RELEASE_SHA" ops database/migrations composer.json composer.lock |
+              tar -x -C "$CANDIDATE"
+            php "$CANDIDATE/ops/release-preflight.php" --project-root="$PROJECT" \
+              --migration-root="$CANDIDATE/database/migrations" --require-current
+            composer2 --no-plugins --no-scripts --working-dir="$CANDIDATE" check-platform-reqs --lock --no-dev
+            if [ -n "$BACKUP_ID" ]; then
+              BACKUP="$HOME/upgrade79-private-backups/$BACKUP_ID"
+              test -f "$BACKUP/RESTORE_VERIFIED"
+              (cd "$BACKUP" && sha256sum --check --quiet SHA256SUMS)
+            fi
+
+            echo "== Respaldo automático de código antes de publicar =="
+            install -d -m 700 "$HOME/upgrade79-deploy-rollbacks"
+            ROLLBACK=$(mktemp -d "$HOME/upgrade79-deploy-rollbacks/backend-$RELEASE_SHA-XXXXXX")
+            git rev-parse HEAD > "$ROLLBACK/backend-head.txt"
+            tar --exclude='./storage' --exclude='./.git' -czf "$ROLLBACK/backend-code.tar.gz" -C "$PROJECT" .
+            gzip -t "$ROLLBACK/backend-code.tar.gz"
+            sha256sum "$ROLLBACK/backend-code.tar.gz" > "$ROLLBACK/SHA256SUMS"
+
+            echo "== Publicando exactamente el commit del evento =="
+            php artisan down --retry=60
             git -c advice.detachedHead=false checkout --detach "$RELEASE_SHA"
             test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
 
@@ -98,11 +165,7 @@ jobs:
             echo "== Limpiando caché =="
             php artisan optimize:clear
 
-            echo "== Verificando la única diferencia de esquema permitida =="
-            php ops/release-preflight.php
-            if [ "$RUN_CONFIGURATION_MIGRATION" = "true" ]; then
-              php artisan migrate --force --path=database/migrations/2026_10_28_000001_add_configuration_context_to_order_items.php
-            fi
+            echo "== Sin migraciones: el esquema debe estar actualizado =="
             php ops/release-preflight.php --require-current
 
             echo "== Actualizando archivos públicos =="
@@ -136,3 +199,55 @@ jobs:
             test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
 
             echo "== Deploy completado correctamente =="
+            UPGRADE79_REMOTE
+
+  migrate_configuration:
+    name: Authorized configuration_context migration only
+    needs: validate
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.run_configuration_migration
+    environment: production-migrations
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply only the reviewed migration after verified backup
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: 212.85.29.152
+          username: u497825029
+          password: ${{ secrets.HOSTINGER_PASSWORD }}
+          port: 65002
+          command_timeout: 30m
+          envs: RELEASE_SHA,BACKUP_ID
+          script: |
+            bash -se <<'UPGRADE79_REMOTE'
+            set -euo pipefail
+            export GIT_TERMINAL_PROMPT=0
+            umask 077
+            command -v flock > /dev/null
+            exec 9>"$HOME/.upgrade79-deploy.lock"
+            flock -w 900 9
+            PROJECT=/home/u497825029/domains/crmupgradecol.com/laravel
+            BACKUP="$HOME/upgrade79-private-backups/$BACKUP_ID"
+            cd "$PROJECT"
+            test -f "$BACKUP/RESTORE_VERIFIED"
+            test "$(cat "$BACKUP/backend-head.txt")" = "$(git rev-parse HEAD)"
+            (cd "$BACKUP" && sha256sum --check --quiet SHA256SUMS)
+            test -f storage/framework/down
+            git diff --quiet
+            git diff --cached --quiet
+            git fetch origin main
+            git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+            git merge-base --is-ancestor HEAD "$RELEASE_SHA"
+            git diff --name-status HEAD "$RELEASE_SHA" -- database/migrations |
+              awk '$1 != "A" { bad=1 } END { exit bad }'
+            install -d -m 700 "$HOME/upgrade79-deploy-candidates"
+            CANDIDATE=$(mktemp -d "$HOME/upgrade79-deploy-candidates/migration-$RELEASE_SHA-XXXXXX")
+            git archive "$RELEASE_SHA" ops database/migrations | tar -x -C "$CANDIDATE"
+            php -r 'require $argv[1]."/ops/ReleaseMigrationPlan.php"; if (!hash_equals(ReleaseMigrationPlan::MIGRATION_SHA256, hash_file("sha256", $argv[1]."/database/migrations/".ReleaseMigrationPlan::MIGRATION.".php"))) { exit(1); }' "$CANDIDATE"
+            php "$CANDIDATE/ops/release-preflight.php" --project-root="$PROJECT" \
+              --migration-root="$CANDIDATE/database/migrations"
+            php artisan migrate --force --realpath \
+              --path="$CANDIDATE/database/migrations/2026_10_28_000001_add_configuration_context_to_order_items.php"
+            php "$CANDIDATE/ops/release-preflight.php" --project-root="$PROJECT" \
+              --migration-root="$CANDIDATE/database/migrations" --require-current
+            echo "Migración autorizada terminada. Sin checkout, Composer ni publicación; reanudar el deploy bloqueado."
+            UPGRADE79_REMOTE

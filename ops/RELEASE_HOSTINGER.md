@@ -1,8 +1,10 @@
 # Release Hostinger — procedimiento controlado
 
 Este documento prepara operaciones; NO las autoriza ni las ejecuta.
-Los workflows son exclusivamente manuales, fijados al SHA completo de main seleccionado.
-GitHub environment production debe tener revisores requeridos configurados por el usuario.
+Los workflows despliegan automáticamente con push a main y conservan workflow_dispatch.
+El código siempre corresponde al SHA del evento. Los deploys ordinarios NO requieren
+aprobación manual, backup_id ni un entorno con revisores. Únicamente la operación manual
+de migración utiliza production-migrations (configurar sus revisores si el plan lo permite).
 Antes del primer push: deshabilitar temporalmente Actions en ambos repositorios, cancelar
 ejecuciones anteriores y comprobar que no existe otro auto-deploy Git en hPanel.
 
@@ -62,7 +64,9 @@ Solo después de la prueba, el operador registra su verificación:
     basename "$BACKUP"
 
 El marcador es una declaración del operador, no una restauración automática.
-El último resultado es el backup_id de AMBOS workflows.
+El último resultado es el backup_id OBLIGATORIO para la operación manual de migración.
+En despliegues ordinarios se crean respaldos privados de código automáticamente; no se
+exige este respaldo SQL ni intervención del usuario cuando el esquema ya está al día.
 
 ## 3. Regularizar SOLO CORS — autorización separada
 
@@ -88,8 +92,8 @@ SOLO tras autorizar expresamente sustituir ESTE archivo por su versión versiona
     git diff --cached --quiet
 
 No se pierde el original: queda en respaldo privado. No afecta .env ni otros archivos.
-Mantener caché vigente hasta el despliegue. Si no se autoriza la sustitución puntual,
-no ejecutar el workflow in-place; preparar otra estrategia.
+Si no se autoriza la sustitución puntual, el workflow se detendrá antes de publicar;
+no descartar cambios ajenos para desbloquearlo.
 
 ## 4. .env productivo — privado y sin activar cobros ni SMTP
 
@@ -111,28 +115,47 @@ La URL de eventos debe verificarse en el dashboard Wompi, no se registra por .en
 https://upgradecolombia.com/api/webhooks/wompi
 No activar el mailer global ni SMTP de documentos.
 
+Tras autorizar y completar CORS/.env en este primer release, reconstruir su configuración
+efectiva mediante php artisan config:cache. La guarda previa inspecciona la instalación
+ACTUAL, incluso su caché; el archivo editado no basta para eliminar los tres orígenes
+cacheados. No ejecutar esta operación ahora sin autorización productiva.
+
 ## 5. Punto del push y backend
 
-Con commits aprobados, respaldo recuperable, CORS regularizado y mantenimiento,
-autorizar el push de AMBOS repositorios a main. Actions aún deshabilitadas; no despachar.
-Verificar en GitHub que llegó el SHA exacto y que el YAML publicado no tiene trigger push.
-Reactivar Actions y despachar primero backend con release_sha y backup_id.
-Marcar run_configuration_migration SOLO con autorización expresa.
+PRIMER RELEASE: autorizar push backend, verificar YAML y reactivar Actions si estaban
+deshabilitadas. No ejecutar workflows antiguos ya encolados. La ejecución automática se
+detendrá SIN checkout/Composer/mantenimiento si el esquema no está preparado. La copia
+privada del candidato permite comparar TODOS sus nombres de migración con la base real
+antes de cambiar la versión instalada. 87 frente a 88 por sí solo no prueba igualdad.
+Si el push se realizó con Actions deshabilitadas, no hay ejecución retroactiva: después
+de reactivarlas, lanzar dispatch SIN marcar migración para esta primera ejecución.
+Es un arranque excepcional; los siguientes pushes a main sí se ejecutan automáticamente.
 
-El workflow exige respaldo correspondiente al HEAD anterior, mantenimiento y árbol tracked
-limpio. Obtiene el SHA aprobado, valida ascendencia, checkout exacto e instala desde lock.
-ops/release-preflight.php compara TODOS los nombres aplicados contra los archivos del release.
-87 frente a 88 por sí solo no prueba igualdad. Solo permite ninguna pendiente o exactamente:
+Si falta la migración conocida, con respaldo verificado, CORS/configuración regularizados
+y mantenimiento autorizado, ejecutar workflow_dispatch backend marcando
+run_configuration_migration=true y aportando backup_id. release_sha es una confirmación
+opcional que, si se proporciona, debe coincidir con el SHA seleccionado de main.
+Solo esta operación excepcional admite exactamente:
 
     2026_10_28_000001_add_configuration_context_to_order_items.php
 
 Rechaza otras pendientes, historial huérfano y columna preexistente con migración pendiente.
-El único comando de migración que permite la casilla es:
+La operación ejecuta el archivo candidato por ruta absoluta, con --realpath; equivalente a:
 
     php artisan migrate --force --path=database/migrations/2026_10_28_000001_add_configuration_context_to_order_items.php
 
-No ejecutarlo de nuevo manualmente además del workflow. Si no se autoriza y está pendiente,
-el workflow se detiene en mantenimiento. No ejecuta migraciones globales.
+No ejecutar el comando también por SSH. La operación exige backup recuperable asociado
+al HEAD instalado, mantenimiento y aprobación previa; NO cambia código, Composer ni
+cachés y deja mantenimiento como estaba. Reejecutar después el deploy automático fallido
+(Re-run jobs), o lanzar dispatch SIN marcar migración. No hace falta otro commit.
+
+DESPLIEGUES NORMALES: modificar, commit y push a main. CI valida dependencias, sintaxis,
+Pint y unit tests sin base de datos. SSH verifica árbol limpio, ascendencia, plataforma
+PHP y esquema del candidato. Rechaza también modificaciones/borrados de migraciones
+históricas. Si todo pasa, respalda código/env/vendor privadamente y publica el SHA exacto.
+No ejecuta NINGÚN comando migrate. Solo entonces entra en mantenimiento, instala desde
+lock, reconstruye cachés y sale de mantenimiento al completar. Una migración futura
+necesita operación autorizada específica; no se ejecuta automáticamente por ser nueva.
 
 Después de éxito:
 
@@ -146,10 +169,21 @@ y sale de mantenimiento SOLO al terminar. queue:restart no inicia un consumidor.
 
 ## 6. Frontend y smoke tests
 
-Despachar frontend manualmente con SHA frontend, SHA backend ya publicado y backup_id.
-Comprueba backend/esquema, compila cliente+SSR+prerender con API y canónico públicos y
-publica el NUEVO build. No usa el dist local viejo ni publica qa-artifacts/.env privados.
+En este primer release, publicar primero backend y después hacer el push frontend.
+Después, cada push frontend a main ejecuta tests, build cliente/SSR/prerender y controles.
+Los campos SHA backend y backup_id son opcionales para dispatch coordinado, no se
+solicitan en push normal. El paquete se sube a un directorio privado, no al sitio vivo.
+Antes de publicar comprueba hashes, estado del backend/esquema y preserva un respaldo
+privado automático. Copia assets antes del HTML y sustituye index al final.
+No usa el dist local viejo ni publica qa-artifacts/.env privados.
 Conserva puente y .htaccess raíz; instala solo el bloque SEO administrado con respaldo.
+
+Concurrencia GitHub serializada sin cancelar procesos activos; bloqueo flock compartido
+en Hostinger entre backend, frontend y migraciones. Requiere flock disponible y ambos
+despliegues con el mismo usuario Hostinger. No son suficientes grupos GitHub distintos
+entre repositorios. El frontend rechaza ejecuciones antiguas frente al run ya publicado.
+Los jobs ordinarios NO deben usar un environment con aprobaciones requeridas; sus secretos
+deben estar disponibles a nivel repositorio/organización. No se cambian secretos aquí.
 
     curl -sS -o /dev/null -w 'API health: %{http_code}\n' https://upgradecolombia.com/api/health
     curl -sS -o /dev/null -w 'Frontend: %{http_code}\n' https://upgradecolombia.com/
@@ -165,7 +199,9 @@ Revisar consumidor Push existente sin regenerar VAPID ni modificar el Service Wo
 
 ## 7. Recuperación
 
-Si falla backend, queda en mantenimiento. No ejecutar up a ciegas ni migración global.
+Si falla una validación previa, conserva la versión y disponibilidad anteriores.
+Si backend falla después de entrar en mantenimiento, queda así; no ejecutar up a ciegas
+ni migración global. Los respaldos de código están en upgrade79-deploy-rollbacks.
 Registrar último paso y si la columna llegó a aplicarse. No migrate:rollback: conservar
 la columna nullable y los snapshots, incluso si se recupera código anterior.
 
@@ -179,3 +215,18 @@ de clientes ya cacheados.
 No restaurar SQL automáticamente: podría borrar órdenes/pagos posteriores al respaldo.
 La recuperación de base exige autorización independiente, respaldo del estado fallido
 y reconciliación de operaciones externas. No borrar respaldos.
+
+## 8. Validación de los workflows sin Hostinger
+
+    php vendor/bin/phpunit --no-configuration --bootstrap vendor/autoload.php --do-not-cache-result tests/Unit
+    php vendor/bin/pint --test ops tests/Unit
+    python3 ops/test_deploy_workflows.py
+
+El último comando requiere PyYAML y ambos repositorios locales; no es una dependencia
+de producción ni ejecuta SSH/SQL. Usa comandos falsos y directorios temporales propios
+para probar publicación exitosa y rechazo antes de cambiar código/HTML. No modifica HOME.
+Conserva las pruebas anteriores y añade protección por hash del archivo de migración.
+Los jobs CI ejecutan unit tests PHP sin base de datos y la suite frontend antes del build.
+
+La concurrencia GitHub es por repositorio: https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+Los revisores de environment se reservan a migraciones: https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments

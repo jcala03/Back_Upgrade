@@ -10,6 +10,12 @@ require_once __DIR__.'/../../ops/ReleaseMigrationPlan.php';
 
 class ReleaseMigrationPlanTest extends TestCase
 {
+    public function test_authorized_migration_is_exactly_the_reviewed_file(): void
+    {
+        $this->assertSame(\ReleaseMigrationPlan::MIGRATION_SHA256,
+            hash_file('sha256', dirname(__DIR__, 2).'/database/migrations/'.\ReleaseMigrationPlan::MIGRATION.'.php'));
+    }
+
     public function test_only_the_reviewed_migration_can_be_pending(): void
     {
         $report = \ReleaseMigrationPlan::verify(['old', \ReleaseMigrationPlan::MIGRATION], ['old'], []);
@@ -28,6 +34,14 @@ class ReleaseMigrationPlanTest extends TestCase
     public static function compatibleColumnTypes(): array
     {
         return [['json'], ['longtext']];
+    }
+
+    public function test_ordinary_deploy_accepts_future_migrations_only_after_they_are_applied(): void
+    {
+        $files = ['old', \ReleaseMigrationPlan::MIGRATION, 'future_authorized_migration'];
+        $report = \ReleaseMigrationPlan::verify($files, $files, [['IS_NULLABLE' => 'YES', 'DATA_TYPE' => 'json']], true);
+        $this->assertSame([], $report['pending']);
+        $this->assertSame(3, $report['applied']);
     }
 
     #[DataProvider('unsafePlans')]
@@ -51,6 +65,8 @@ class ReleaseMigrationPlanTest extends TestCase
             'non nullable' => [[$migration], [$migration], [['IS_NULLABLE' => 'NO', 'DATA_TYPE' => 'json']], true],
             'wrong type' => [[$migration], [$migration], [['IS_NULLABLE' => 'YES', 'DATA_TYPE' => 'varchar']], true],
             'authorization omitted' => [[$migration], [], [], true],
+            'future pending on ordinary deploy' => [[$migration, 'future'], [$migration], $valid, true],
+            'same counts but different history' => [[$migration, 'release-file'], [$migration, 'different-file'], $valid, true],
         ];
     }
 }

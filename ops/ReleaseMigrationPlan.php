@@ -4,6 +4,8 @@ final class ReleaseMigrationPlan
 {
     public const MIGRATION = '2026_10_28_000001_add_configuration_context_to_order_items';
 
+    public const MIGRATION_SHA256 = '0b2587afa21f6f869d18b1d91642d9ce0dabffa8fc542f668ddc3ad5939e8eb8';
+
     public static function verify(array $files, array $applied, array $columns, bool $requireCurrent = false): array
     {
         $pending = array_values(array_diff($files, $applied));
