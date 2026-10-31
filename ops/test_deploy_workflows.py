@@ -93,6 +93,23 @@ class AutomaticDeployPolicy(unittest.TestCase):
                     {"BACKUP_ID": "../other"}, {"RELEASE_RUN_NUMBER": "not-a-number"}]:
             self.assertNotEqual(execute(script, {**base, **bad}).returncode, 0)
 
+    def test_push_always_loads_committed_backend_pin_and_dispatch_cannot_override_it(self):
+        steps = self.frontend["jobs"]["deploy"]["steps"]
+        step = next(s for s in steps if s.get("name") == "Require the backend commit paired with this frontend")
+        self.assertLess(steps.index(step), next(i for i,s in enumerate(steps) if "scp-action" in s.get("uses", "")))
+        pin = (FRONTEND/".github/required-backend-sha").read_text().strip()
+        self.assertRegex(pin, r"^[0-9a-f]{40}$")
+        with tempfile.TemporaryDirectory(prefix="upgrade79-backend-pin-") as directory:
+            exported = Path(directory)/"github-env"
+            script = "cd "+shlex.quote(str(FRONTEND))+"\n"+step["run"]
+            base = dict(BACKEND_SHA="", GITHUB_ENV=str(exported))
+            self.assertEqual(execute(script, base).returncode, 0)
+            self.assertEqual(exported.read_text(), "BACKEND_SHA="+pin+"\n")
+            exported.unlink()
+            wrong = "0"*40 if pin != "0"*40 else "1"*40
+            self.assertNotEqual(execute(script, {**base, "BACKEND_SHA": wrong}).returncode, 0)
+            self.assertFalse(exported.exists())
+
     def test_no_migration_command_in_ordinary_deploy(self):
         normal = remote_script(self.backend["jobs"]["deploy"])
         self.assertNotRegex(normal, r"php\s+artisan\s+migrate\b")
@@ -139,9 +156,10 @@ class AutomaticDeployPolicy(unittest.TestCase):
     def fake_commands(self, root):
         binary = root / "bin"
         fixture_file(binary / "git", '#!/usr/bin/env bash\nprintf "git %s\\n" "$*" >> "$TEST_COMMAND_LOG"\n'
-                     'case "$1" in\nrev-parse) printf "%s\\n" "$RELEASE_SHA" ;;\n'
-                     'archive) cat "$TEST_ARCHIVE" ;;\nesac\n')
+                     'case "$*" in\n*rev-parse*) printf "%s\\n" "${TEST_BACKEND_SHA:-$RELEASE_SHA}" ;;\n'
+                     'archive*) cat "$TEST_ARCHIVE" ;;\nesac\n')
         fixture_file(binary / "php", '#!/usr/bin/env bash\nprintf "php %s\\n" "$*" >> "$TEST_COMMAND_LOG"\n'
+                     'if [ "${TEST_FAIL_COMMAND:-}" = "$*" ]; then exit 42; fi\n'
                      'if [ "$TEST_SCHEMA_FAIL" = "0" ]; then exit 0; fi\nexit 42\n')
         fixture_file(binary / "composer2", '#!/usr/bin/env bash\nprintf "composer %s\\n" "$*" >> "$TEST_COMMAND_LOG"\nexit 0\n')
         for executable in binary.iterdir():
@@ -181,6 +199,7 @@ class AutomaticDeployPolicy(unittest.TestCase):
             self.assertNotIn("artisan down", log)
             self.assertEqual((project/"installed-marker").read_text(), "ISOLATED FIXTURE ONLY\n")
             self.assertEqual((public/"index.php").read_text(), "OLD API\n")
+            self.assertFalse((root/".upgrade79-backend-deployed-sha").exists())
 
     def test_successful_ordinary_backend_deploy_never_runs_migrations(self):
         with tempfile.TemporaryDirectory(prefix="upgrade79-deploy-policy-") as directory:
@@ -211,9 +230,16 @@ class AutomaticDeployPolicy(unittest.TestCase):
             self.assertIn("composer install", log)
             self.assertIn("artisan config:cache", log)
             self.assertIn("artisan up", log)
+            self.assertEqual((root/".upgrade79-backend-deployed-sha").read_text(), "a"*40+"\n")
             self.assertNotIn("artisan migrate", log)
             self.assertEqual((public/"index.php").read_text(), "NEW API\n")
             self.assertEqual(len(list((root/"upgrade79-deploy-rollbacks").glob("*/backend-code.tar.gz"))), 1)
+            # A later checkout can succeed while cache preparation fails: no new receipt.
+            failed = execute(script, {**env, "RELEASE_SHA": "b"*40,
+                                      "TEST_FAIL_COMMAND": "artisan config:cache"})
+            self.assertEqual(failed.returncode, 42, failed.stdout+failed.stderr)
+            self.assertIn("checkout --detach "+"b"*40, (root/"commands.log").read_text())
+            self.assertEqual((root/".upgrade79-backend-deployed-sha").read_text(), "a"*40+"\n")
 
     def test_failed_frontend_schema_gate_never_replaces_published_html(self):
         with tempfile.TemporaryDirectory(prefix="upgrade79-deploy-policy-") as directory:
@@ -231,12 +257,37 @@ class AutomaticDeployPolicy(unittest.TestCase):
             manifest = "".join(hashlib.sha256(data.encode()).hexdigest()+"  ./"+name+"\n"
                                for name,data in files.items())
             fixture_file(candidate/"DEPLOY_SHA256SUMS", manifest)
+            fixture_file(root/".upgrade79-backend-deployed-sha", "b"*40+"\n")
             script = remote_script(self.frontend["jobs"]["deploy"]).replace("$HOME", "$DEPLOY_TEST_ROOT")
-            result = execute(script, self.fake_commands(root))
+            env = {**self.fake_commands(root), "BACKEND_SHA": "b"*40, "TEST_BACKEND_SHA": "b"*40}
+            result = execute(script, env)
             self.assertEqual(result.returncode, 42, result.stderr)
             self.assertEqual((front/"index.html").read_text(), "OLD PUBLIC FILE\n")
             self.assertEqual((front/"laravel-api.php").read_text(), "OLD PUBLIC FILE\n")
             self.assertFalse((root/".upgrade79-frontend-deploy-state").exists())
+
+    def test_frontend_refuses_early_publish_even_when_schema_is_ready(self):
+        for backend, receipt in [("c"*40, "b"*40), ("b"*40, None), ("b"*40, "c"*40)]:
+            with self.subTest(backend=backend, receipt=receipt), tempfile.TemporaryDirectory(prefix="upgrade79-order-") as directory:
+                root = Path(directory)
+                project = root/"domains/crmupgradecol.com/laravel"
+                front = root/"domains/upgradecolombia.com/public_html"
+                candidate = root/("upgrade79-deploy-incoming/frontend/"+"a"*40)
+                fixture_file(project/"ops/release-preflight.php", "isolated fixture\n")
+                for name in ["laravel-api.php", ".htaccess", "index.html"]:
+                    fixture_file(front/name, "KEEP ORIGINAL\n")
+                fixture_file(candidate/"RELEASE_COMMIT", "a"*40+"\n")
+                fixture_file(candidate/"DEPLOY_SHA256SUMS", hashlib.sha256(("a"*40+"\n").encode()).hexdigest()+"  RELEASE_COMMIT\n")
+                if receipt:
+                    fixture_file(root/".upgrade79-backend-deployed-sha", receipt+"\n")
+                env = {**self.fake_commands(root), "TEST_SCHEMA_FAIL": "0",
+                       "BACKEND_SHA": "b"*40, "TEST_BACKEND_SHA": backend}
+                script = remote_script(self.frontend["jobs"]["deploy"]).replace("$HOME", "$DEPLOY_TEST_ROOT")
+                result = execute(script, env)
+                self.assertNotEqual(result.returncode, 0, result.stdout+result.stderr)
+                self.assertEqual((front/"index.html").read_text(), "KEEP ORIGINAL\n")
+                self.assertNotIn("php ", (root/"commands.log").read_text())
+                self.assertFalse((root/".upgrade79-frontend-deploy-state").exists())
 
     def test_successful_frontend_publish_preserves_bridge_storage_and_runs_smoke_checks(self):
         with tempfile.TemporaryDirectory(prefix="upgrade79-deploy-policy-") as directory:
@@ -260,7 +311,9 @@ class AutomaticDeployPolicy(unittest.TestCase):
                 fixture_file(candidate/name, data)
             fixture_file(candidate/"DEPLOY_SHA256SUMS", "".join(
                 hashlib.sha256(data.encode()).hexdigest()+"  ./"+name+"\n" for name,data in files.items()))
-            env = {**self.fake_commands(root), "TEST_SCHEMA_FAIL": "0"}
+            fixture_file(root/".upgrade79-backend-deployed-sha", "b"*40+"\n")
+            env = {**self.fake_commands(root), "TEST_SCHEMA_FAIL": "0",
+                   "BACKEND_SHA": "b"*40, "TEST_BACKEND_SHA": "b"*40}
             fixture_file(root/"bin/curl", '''#!/usr/bin/env python3
 import os, sys
 from pathlib import Path

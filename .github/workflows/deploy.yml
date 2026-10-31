@@ -197,6 +197,11 @@ jobs:
 
             php artisan up
             test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+            # A checkout alone does not prove Composer, caches and artisan up succeeded.
+            RECEIPT=$(mktemp "$HOME/.upgrade79-backend-deployed-sha.XXXXXX")
+            printf '%s\n' "$RELEASE_SHA" > "$RECEIPT"
+            chmod 600 "$RECEIPT"
+            mv -f "$RECEIPT" "$HOME/.upgrade79-backend-deployed-sha"
 
             echo "== Deploy completado correctamente =="
             UPGRADE79_REMOTE

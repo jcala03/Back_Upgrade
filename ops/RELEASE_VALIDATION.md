@@ -1,5 +1,15 @@
 # Validación local del release — 2026-10-30
 
+## Cierre de bootstrap (validación posterior)
+
+- Regresión de workflows: 13 PASS, sin SSH/SQL reales. Incluye rechazo frontend ante
+  backend equivocado, marca ausente o marca de otro SHA aun con esquema listo.
+- Pin backend obligatorio en push y dispatch; dispatch no puede reemplazarlo.
+- Marca backend atómica al terminar deploy; checkout aislado no habilita frontend.
+- PHP Unit: 43 PASS, 80 aserciones, sin conexión a base de datos.
+- Secuencia independiente SCP → respaldo restaurado → migrate --realpath --path único
+  documentada en FIRST_RELEASE_BOOTSTRAP.md; NO ejecutada en Hostinger.
+
 - Backend funcional: 73 PASS, 636 aserciones. Comisiones, permisos propios/admin,
   documentos PDF/correo simulado, compatibilidad/configurador, firmas e importes.
 - Política nueva de migraciones: 11 PASS, 14 aserciones; rechaza pendientes distintas,

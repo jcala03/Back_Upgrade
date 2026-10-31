@@ -1,6 +1,9 @@
 # Release Hostinger — procedimiento controlado
 
 Este documento prepara operaciones; NO las autoriza ni las ejecuta.
+Para cerrar el primer release SIN depender del deploy bloqueado, usar
+[FIRST_RELEASE_BOOTSTRAP.md](FIRST_RELEASE_BOOTSTRAP.md): entrega privada por SCP,
+migración única y vínculo obligatorio entre los commits backend/frontend.
 Los workflows despliegan automáticamente con push a main y conservan workflow_dispatch.
 El código siempre corresponde al SHA del evento. Los deploys ordinarios NO requieren
 aprobación manual, backup_id ni un entorno con revisores. Únicamente la operación manual
@@ -171,8 +174,11 @@ y sale de mantenimiento SOLO al terminar. queue:restart no inicia un consumidor.
 
 En este primer release, publicar primero backend y después hacer el push frontend.
 Después, cada push frontend a main ejecuta tests, build cliente/SSR/prerender y controles.
-Los campos SHA backend y backup_id son opcionales para dispatch coordinado, no se
-solicitan en push normal. El paquete se sube a un directorio privado, no al sitio vivo.
+El SHA backend requerido está versionado en .github/required-backend-sha del frontend
+y es obligatorio también en push. El input opcional backend_sha solo lo confirma;
+no permite reemplazarlo. Se exige HEAD remoto y marca privada de deploy exitoso con
+ese mismo SHA; flock solo evita carreras y NO sustituye esta dependencia.
+backup_id sigue siendo opcional. El paquete se sube a un directorio privado, no al sitio vivo.
 Antes de publicar comprueba hashes, estado del backend/esquema y preserva un respaldo
 privado automático. Copia assets antes del HTML y sustituye index al final.
 No usa el dist local viejo ni publica qa-artifacts/.env privados.
