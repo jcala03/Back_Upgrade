@@ -98,7 +98,7 @@ No se pierde el original: queda en respaldo privado. No afecta .env ni otros arc
 Si no se autoriza la sustitución puntual, el workflow se detendrá antes de publicar;
 no descartar cambios ajenos para desbloquearlo.
 
-## 4. .env productivo — privado y sin activar cobros ni SMTP
+## 4. .env productivo — privado y sin activar SMTP
 
 Editar únicamente con autorización el .env EXISTENTE mediante editor privado.
 Preservar APP_KEY productiva, MySQL, sesiones/Sanctum, VAPID/Push y proveedores.
@@ -110,13 +110,22 @@ Nunca copiar el .env de localhost ni imprimir secretos.
     COMMERCIAL_DOCUMENTS_REAL_MAIL_ENABLED=false
     MAIL_MAILER=array
 
-Mantener WOMPI_PUBLIC_KEY y WOMPI_INTEGRITY_SECRET vacías en ESTE release. El preflight
-lo exige: no existe bandera global y estos dos valores bastan para iniciar checkout.
-No introducir las credenciales expuestas. Las cuatro credenciales productivas nuevas
-se instalarán por canal privado SOLO después de coordinar rotación y autorizar activación.
+La exigencia de claves vacías pertenecía al primer release con compras bloqueadas.
+Para la producción configurada deliberadamente, el preflight exige las cuatro
+credenciales presentes y coherentes con producción: WOMPI_PUBLIC_KEY (pub_prod_),
+WOMPI_PRIVATE_KEY (prv_prod_), WOMPI_INTEGRITY_SECRET (prod_integrity_) y
+WOMPI_EVENTS_SECRET (prod_events_), con sufijo no vacío y sin espacios ni controles.
+No insertar valores en documentación ni cambiar el .env para satisfacer el deploy.
+No introducir credenciales expuestas: su rotación debe confirmarse por canal privado.
+Esta validación es estructural, no acredita vigencia, pertenencia al mismo comercio
+ni autorización para efectuar cobros. No existe bandera global de checkout: las
+credenciales ya configuradas permiten compras tradicionales en el código existente.
+No realizar pruebas con cobros reales sin autorización independiente.
 La URL de eventos debe verificarse en el dashboard Wompi, no se registra por .env:
 https://upgradecolombia.com/api/webhooks/wompi
 No activar el mailer global ni SMTP de documentos.
+
+Para publicar esta corrección seguir [WOMPI_PREFLIGHT_RELEASE.md](WOMPI_PREFLIGHT_RELEASE.md).
 
 Tras autorizar y completar CORS/.env en este primer release, reconstruir su configuración
 efectiva mediante php artisan config:cache. La guarda previa inspecciona la instalación

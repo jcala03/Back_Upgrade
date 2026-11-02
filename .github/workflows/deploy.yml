@@ -78,7 +78,9 @@ jobs:
           bash -n ops/backup-production.sh
           php vendor/bin/pint --test ops tests/Unit
       - name: Unit tests without database or external payments
-        run: php vendor/bin/phpunit --no-configuration --bootstrap vendor/autoload.php --do-not-cache-result tests/Unit
+        run: |
+          php vendor/bin/phpunit --no-configuration --bootstrap vendor/autoload.php --do-not-cache-result tests/Unit
+          python3 ops/test_release_preflight.py
 
   deploy:
     name: Deploy to Hostinger

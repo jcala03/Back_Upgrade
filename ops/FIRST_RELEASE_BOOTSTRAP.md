@@ -3,6 +3,12 @@
 Instrucciones preparadas, NO ejecutadas. Requieren autorización para mantenimiento,
 respaldo, CORS/configuración, migración y push. No activar compras ni correo reales.
 
+Este procedimiento documenta la migración del primer release, ya aplicada. No
+repetirla para corregir Wompi. La política actual admite la producción configurada
+deliberadamente y requiere cuatro credenciales productivas completas; no presupone
+claves vacías. Para el despliegue sin migraciones consultar
+[WOMPI_PREFLIGHT_RELEASE.md](WOMPI_PREFLIGHT_RELEASE.md).
+
 ## 1. Entregar la migración ANTES de cualquier push (equipo local)
 
 Desde backendupgrade, con el commit backend aprobado en HEAD:
@@ -14,7 +20,7 @@ RELEASE_BACKEND_SHA=$(git rev-parse HEAD)
 [[ "$RELEASE_BACKEND_SHA" =~ ^[0-9a-f]{40}$ ]]
 BOOTSTRAP_DIR=$(mktemp -d /tmp/upgrade79-bootstrap.XXXXXX)
 git archive --format=tar.gz --output="$BOOTSTRAP_DIR/bootstrap.tar.gz" \
-  "$RELEASE_BACKEND_SHA" ops/release-preflight.php ops/ReleaseMigrationPlan.php \
+  "$RELEASE_BACKEND_SHA" ops/release-preflight.php ops/ReleaseMigrationPlan.php ops/ReleaseWompiPolicy.php \
   ops/backup-production.sh database/migrations
 (cd "$BOOTSTRAP_DIR" && sha256sum bootstrap.tar.gz > SHA256SUMS)
 printf 'SHA backend aprobado: %s\n' "$RELEASE_BACKEND_SHA"

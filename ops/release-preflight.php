@@ -22,19 +22,25 @@ try {
     // This must run before checkout, Composer, maintenance or cache changes.
     require $project.'/vendor/autoload.php';
     require __DIR__.'/ReleaseMigrationPlan.php';
+    require __DIR__.'/ReleaseWompiPolicy.php';
     $app = require $project.'/bootstrap/app.php';
     $app->bootstrapWith([LoadEnvironmentVariables::class, LoadConfiguration::class]);
     if (! $app->environment('production') || config('app.debug')
         || ! in_array(config('mail.default'), ['log', 'array'], true)
         || config('commercial_documents.real_mail_enabled', false)
         || config('product_configurator.purchase_enabled', false)
-        || filled(config('services.wompi.public_key'))
-        || filled(config('services.wompi.integrity_secret'))
         || rtrim((string) config('services.wompi.base_url'), '/') !== 'https://production.wompi.co/v1'
         || rtrim((string) config('services.wompi.checkout_url'), '/') !== 'https://checkout.wompi.co/p'
         || config('services.wompi.redirect_url') !== 'https://upgradecolombia.com/checkout/payment/return'
         || config('cors.allowed_origins') !== ['https://upgradecolombia.com']) {
-        throw new RuntimeException('Release requires production/debug-off, SMTP documents off, configurator off and live Wompi checkout disabled.');
+        throw new RuntimeException('Release requires production/debug-off, SMTP documents off, configurator off and the reviewed public URLs/CORS.');
+    }
+    // Production credentials were deliberately configured by the operator.
+    // Deployment readiness requires the complete production set, not empty keys.
+    // This read-only policy neither activates checkout nor certifies key validity.
+    $wompiChecks = ReleaseWompiPolicy::checks(config('services.wompi', []));
+    if (in_array(false, $wompiChecks, true)) {
+        throw new RuntimeException('Incomplete or incompatible production Wompi configuration.');
     }
     $name = config('database.default');
     $db = config('database.connections.'.$name, []);
@@ -58,6 +64,9 @@ try {
     echo json_encode($report, JSON_UNESCAPED_SLASHES).PHP_EOL;
 } catch (Throwable $exception) {
     // Never echo PDO exceptions, credentials, SQL bindings or a stack trace.
-    fwrite(STDERR, 'Release preflight refused: '.get_class($exception).'. Review environment/schema privately.'.PHP_EOL);
+    $failedWompiChecks = isset($wompiChecks) ? array_keys(array_filter($wompiChecks, static fn ($pass) => ! $pass)) : [];
+    // Only policy-owned identifiers; never print exception messages or values.
+    $hint = $failedWompiChecks !== [] ? ' Failed checks: '.implode(', ', $failedWompiChecks).'.' : '';
+    fwrite(STDERR, 'Release preflight refused: '.get_class($exception).'.'.$hint.' Review environment/schema privately.'.PHP_EOL);
     exit(1);
 }
