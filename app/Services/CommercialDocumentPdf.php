@@ -30,8 +30,9 @@ class CommercialDocumentPdf
             $pdf->setPaper('A4');
             $pdf->loadHtml(view('documents.commercial', compact('document', 'logo'))->render(), 'UTF-8');
             $pdf->render();
-            $pdf->getCanvas()->page_text(36, 815, 'Upgrade La 79 · '.$document['code'].' · {PAGE_NUM}/{PAGE_COUNT}',
-                $pdf->getFontMetrics()->getFont('DejaVu Sans'), 8, [0.4, 0.4, 0.4]);
+            $pdf->getCanvas()->line(30, 805, 565, 805, [0.84, 0.84, 0.84], 0.5);
+            $pdf->getCanvas()->page_text(30, 817, 'Upgrade La 79 · '.$document['code'].' · {PAGE_NUM}/{PAGE_COUNT}',
+                $pdf->getFontMetrics()->getFont('DejaVu Sans'), 7.5, [0.35, 0.35, 0.35]);
 
             return $pdf->output();
         } finally {
