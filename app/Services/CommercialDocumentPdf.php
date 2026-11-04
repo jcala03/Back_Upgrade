@@ -16,17 +16,20 @@ class CommercialDocumentPdf
         if (! mkdir($temporary, 0700)) {
             throw new RuntimeException('Cannot prepare private PDF workspace.');
         }
+        $fonts = null;
+        $rendered = false;
         try {
+            $fonts = new CommercialPdfFontCache(storage_path('framework/cache/commercial-pdf-fonts'));
             $options = new Options;
             $options->set('isRemoteEnabled', false);
             $options->set('isPhpEnabled', false);
             $options->set('isJavascriptEnabled', false);
             $options->set('defaultFont', 'DejaVu Sans');
             $options->set('tempDir', $temporary);
-            $options->set('fontCache', $temporary);
+            $options->set('fontCache', $fonts->acquire($options, $temporary));
             $options->set('chroot', resource_path('branding'));
             $logo = 'data:image/png;base64,'.base64_encode(file_get_contents(resource_path('branding/upgrade79-logo.png')));
-            $pdf = new Dompdf($options);
+            $pdf = $this->makeDompdf($options);
             $pdf->setPaper('A4');
             $pdf->loadHtml(view('documents.commercial', compact('document', 'logo'))->render(), 'UTF-8');
             $pdf->render();
@@ -34,9 +37,21 @@ class CommercialDocumentPdf
             $pdf->getCanvas()->page_text(30, 817, 'Upgrade La 79 · '.$document['code'].' · {PAGE_NUM}/{PAGE_COUNT}',
                 $pdf->getFontMetrics()->getFont('DejaVu Sans'), 7.5, [0.35, 0.35, 0.35]);
 
-            return $pdf->output();
+            $bytes = $pdf->output();
+            $rendered = true;
+
+            return $bytes;
         } finally {
-            (new Filesystem)->deleteDirectory($temporary);
+            try {
+                $fonts?->release($rendered);
+            } finally {
+                (new Filesystem)->deleteDirectory($temporary);
+            }
         }
+    }
+
+    protected function makeDompdf(Options $options): Dompdf
+    {
+        return new Dompdf($options);
     }
 }
