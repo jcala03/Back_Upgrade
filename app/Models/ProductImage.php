@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\PublicStorageUrl;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
@@ -18,6 +19,6 @@ class ProductImage extends Model
 
     public function imageUrl(): string
     {
-        return str_starts_with($this->path, 'http') ? $this->path : asset('storage/'.$this->path);
+        return PublicStorageUrl::image($this->path) ?? '';
     }
 }

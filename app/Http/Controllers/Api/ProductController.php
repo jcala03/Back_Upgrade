@@ -276,7 +276,7 @@ class ProductController extends Controller
                         'specValues.field',
                         'vehicleCompatibilities.vehicleBrand',
                         'vehicleCompatibilities.vehicleModel',
-                        'vehicleCompatibilities.vehicleVersion',
+                        'vehicleCompatibilities.vehicleVersion.multimediaSystems',
                         'vehicleCompatibilities.vehicleMultimediaSystem',
                     ])
                     ->orderBy('sort_order')

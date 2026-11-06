@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Product;
 use App\Models\ProductVariant;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Http\Request;
 
 class PublicVehicleCompatibility
@@ -95,6 +96,9 @@ class PublicVehicleCompatibility
         }
         if ($request->filled('year')) {
             $year = $request->integer('year');
+            if ($variant) {
+                self::technicalYear($query, $year);
+            }
             $query->where(function ($range) use ($year, $variant) {
                 $natural = fn ($row) => $row->where(fn ($version) => $version
                     ->whereNull('vehicle_version_id')
@@ -115,6 +119,27 @@ class PublicVehicleCompatibility
                     });
             });
         }
+    }
+
+    /** Intersect commercial years with recorded coverage of this exact generation/OEM.
+     * Missing technical coverage remains unknown, not invented or certified.
+     */
+    private static function technicalYear(Builder $query, int $year): void
+    {
+        $table = $query->getModel()->getTable();
+        $association = fn (QueryBuilder $link) => $link->selectRaw('1')
+            ->from('vehicle_version_multimedia_system as oem_coverage')
+            ->whereColumn('oem_coverage.vehicle_version_id', $table.'.vehicle_version_id')
+            ->whereColumn('oem_coverage.vehicle_multimedia_system_id', $table.'.vehicle_multimedia_system_id');
+
+        $query->where(function (Builder $coverage) use ($association, $year) {
+            $coverage->whereNotExists($association)
+                ->orWhereExists(function (QueryBuilder $link) use ($association, $year) {
+                    $association($link);
+                    $link->where(fn ($from) => $from->whereNull('oem_coverage.year_from')->orWhere('oem_coverage.year_from', '<=', $year))
+                        ->where(fn ($to) => $to->whereNull('oem_coverage.year_to')->orWhere('oem_coverage.year_to', '>=', $year));
+                });
+        });
     }
 
     /** Same-row predicate shared by public filtering and authoritative purchase validation. */

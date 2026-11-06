@@ -78,6 +78,8 @@ class PublicProductResource extends JsonResource
 
     public static function variantCompatibility(mixed $compatibility): array
     {
+        $version = $compatibility->relationLoaded('vehicleVersion') ? $compatibility->vehicleVersion : null;
+
         return [
             'id' => $compatibility->id,
             'vehicle_brand_id' => $compatibility->vehicle_brand_id,
@@ -86,6 +88,15 @@ class PublicProductResource extends JsonResource
             'vehicle_multimedia_system_id' => $compatibility->vehicle_multimedia_system_id,
             'year_from' => $compatibility->year_from,
             'year_to' => $compatibility->year_to,
+            // Public metadata only, from the same pair; null means not loaded/unknown.
+            'oem_year_ranges' => $version?->relationLoaded('multimediaSystems')
+                ? $version->multimediaSystems
+                    ->filter(fn ($system) => (int) $system->id === (int) $compatibility->vehicle_multimedia_system_id)
+                    ->map(fn ($system) => [
+                        'year_from' => $system->pivot->year_from === null ? null : (int) $system->pivot->year_from,
+                        'year_to' => $system->pivot->year_to === null ? null : (int) $system->pivot->year_to,
+                    ])->values()->all()
+                : null,
             'vehicle_brand' => $compatibility->relationLoaded('vehicleBrand') ? self::vehicleBrand($compatibility->vehicleBrand) : null,
             'vehicle_model' => $compatibility->relationLoaded('vehicleModel') ? self::vehicleModel($compatibility->vehicleModel) : null,
             'vehicle_version' => $compatibility->relationLoaded('vehicleVersion') ? self::vehicleVersion($compatibility->vehicleVersion) : null,
