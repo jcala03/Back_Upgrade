@@ -23,17 +23,19 @@ try {
     require $project.'/vendor/autoload.php';
     require __DIR__.'/ReleaseMigrationPlan.php';
     require __DIR__.'/ReleaseWompiPolicy.php';
+    require __DIR__.'/ReleaseConfiguratorPolicy.php';
     $app = require $project.'/bootstrap/app.php';
     $app->bootstrapWith([LoadEnvironmentVariables::class, LoadConfiguration::class]);
     if (! $app->environment('production') || config('app.debug')
         || ! in_array(config('mail.default'), ['log', 'array'], true)
         || config('commercial_documents.real_mail_enabled', false)
-        || config('product_configurator.purchase_enabled', false)
+        || ! ReleaseConfiguratorPolicy::accepts(config('product_configurator', []),
+            config('database.connections.'.config('database.default'), []))
         || rtrim((string) config('services.wompi.base_url'), '/') !== 'https://production.wompi.co/v1'
         || rtrim((string) config('services.wompi.checkout_url'), '/') !== 'https://checkout.wompi.co/p'
         || config('services.wompi.redirect_url') !== 'https://upgradecolombia.com/checkout/payment/return'
         || config('cors.allowed_origins') !== ['https://upgradecolombia.com']) {
-        throw new RuntimeException('Release requires production/debug-off, SMTP documents off, configurator off and the reviewed public URLs/CORS.');
+        throw new RuntimeException('Release requires production/debug-off, SMTP documents off, reviewed configurator activation and the reviewed public URLs/CORS.');
     }
     // Production credentials were deliberately configured by the operator.
     // Deployment readiness requires the complete production set, not empty keys.

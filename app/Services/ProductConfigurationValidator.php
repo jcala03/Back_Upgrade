@@ -41,6 +41,9 @@ class ProductConfigurationValidator
             || $variant->product_id !== $product->id || ($item['product_variant_id'] ?? null) !== $variant->id) {
             $this->invalid('Selecciona explícitamente una referencia comercial válida para esta configuración.');
         }
+        if (! $this->registry->variantPurchaseApproved($product, $variant)) {
+            $this->invalid('La compra de esta referencia comercial no está habilitada.');
+        }
         foreach (PublicVehicleCompatibility::KEYS as $key) {
             if (! is_int($context[$key] ?? null) || $context[$key] <= 0) {
                 $this->invalid('Completa vehículo, generación y sistema OEM de la configuración.');
@@ -51,20 +54,31 @@ class ProductConfigurationValidator
             $this->invalid('El año seleccionado no es válido.');
         }
 
-        $rows = $variant->vehicleCompatibilities()->with(['vehicleBrand', 'vehicleModel', 'vehicleVersion', 'vehicleMultimediaSystem']);
+        $rows = $variant->vehicleCompatibilities()->with(['vehicleBrand', 'vehicleModel', 'vehicleVersion.multimediaSystems', 'vehicleMultimediaSystem']);
         PublicVehicleCompatibility::matchRow($rows->getQuery(), new Request($context));
         $row = $rows->get()->first(fn ($row) => $row->vehicleBrand?->is_active
             && $row->vehicleModel?->is_active && $row->vehicleVersion?->is_active && $row->vehicleMultimediaSystem?->is_active
             && (int) $row->vehicleModel->vehicle_brand_id === $context['vehicle_brand_id']
             && (int) $row->vehicleVersion->vehicle_model_id === $context['vehicle_model_id']
-            && (int) $row->vehicleMultimediaSystem->vehicle_brand_id === $context['vehicle_brand_id']);
+            && (int) $row->vehicleMultimediaSystem->vehicle_brand_id === $context['vehicle_brand_id']
+            && ($year !== null || ! VehicleYearCoverage::requiresYear(
+                $row->vehicleVersion->year_from, $row->vehicleVersion->year_to, $row->year_from, $row->year_to,
+                $row->vehicleVersion->multimediaSystems->where('id', $row->vehicle_multimedia_system_id)
+                    ->map(fn ($system) => ['year_from' => $system->pivot?->year_from, 'year_to' => $system->pivot?->year_to])->all()
+            )));
         if (! $row) {
-            $this->invalid('La referencia no es compatible con ese vehículo, año y sistema OEM en una misma compatibilidad.');
+            $this->invalid('Verifica el vehículo, el año y el sistema original: deben corresponder a una misma compatibilidad. Indica el año cuando la cobertura sea parcial.');
         }
 
-        $variant->loadMissing('specValues.field');
         $memory = [];
-        foreach (array_keys(VariantMemoryAttributes::FIELDS) as $key) {
+        $memoryProfile = $registration['profile_id'] === 'vehicle-oem-memory-v1';
+        if (! $memoryProfile && (array_key_exists('ram_gb', $context) || array_key_exists('almacenamiento_gb', $context))) {
+            $this->invalid('Esta referencia se selecciona por su configuración comercial, no por memoria.');
+        }
+        if ($memoryProfile) {
+            $variant->loadMissing('specValues.field');
+        }
+        foreach ($memoryProfile ? array_keys(VariantMemoryAttributes::FIELDS) : [] as $key) {
             $values = $variant->specValues->filter(fn ($value) => $value->field?->field_key === $key);
             $value = $values->first();
             $field = $value?->field;

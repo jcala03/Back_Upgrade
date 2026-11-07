@@ -42,8 +42,9 @@ class StorePublicOrderRequest extends FormRequest
             'items.*.configuration_context.vehicle_version_id' => ['required_with:items.*.configuration_context', 'integer', 'min:1'],
             'items.*.configuration_context.vehicle_multimedia_system_id' => ['required_with:items.*.configuration_context', 'integer', 'min:1'],
             'items.*.configuration_context.year' => ['nullable', 'integer', 'between:1900,2100'],
-            'items.*.configuration_context.ram_gb' => ['required_with:items.*.configuration_context', 'integer', 'min:1'],
-            'items.*.configuration_context.almacenamiento_gb' => ['required_with:items.*.configuration_context', 'integer', 'min:1'],
+            // Conditional requirements are enforced by the authoritative registered profile.
+            'items.*.configuration_context.ram_gb' => ['sometimes', 'integer', 'min:1'],
+            'items.*.configuration_context.almacenamiento_gb' => ['sometimes', 'integer', 'min:1'],
             'items.*.unit_price' => ['prohibited'], 'items.*.discount_amount' => ['prohibited'],
             'items.*.item_type' => ['prohibited'], 'items.*.service_id' => ['prohibited'],
             'subtotal' => ['prohibited'],

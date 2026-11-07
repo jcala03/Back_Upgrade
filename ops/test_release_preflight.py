@@ -61,7 +61,7 @@ class ReleasePreflightCLI(unittest.TestCase):
             (self.root / directory).mkdir(parents=True)
         for directory in ['ops', 'database/migrations']:
             (self.candidate / directory).mkdir(parents=True)
-        for file in ['release-preflight.php', 'ReleaseMigrationPlan.php', 'ReleaseWompiPolicy.php']:
+        for file in ['release-preflight.php', 'ReleaseMigrationPlan.php', 'ReleaseWompiPolicy.php', 'ReleaseConfiguratorPolicy.php']:
             shutil.copyfile(BACKEND / 'ops' / file, self.candidate / 'ops' / file)
         # A deliberately blocked installed validator must NOT prevent publishing
         # the corrected candidate. The backend workflow invokes the candidate.
@@ -106,10 +106,30 @@ class ReleasePreflightCLI(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)['status'], 'PASS')
 
     def test_frontend_can_use_corrected_installed_policy_after_backend_deploy(self):
-        for file in ['release-preflight.php', 'ReleaseMigrationPlan.php', 'ReleaseWompiPolicy.php']:
+        for file in ['release-preflight.php', 'ReleaseMigrationPlan.php', 'ReleaseWompiPolicy.php', 'ReleaseConfiguratorPolicy.php']:
             shutil.copyfile(self.candidate / 'ops' / file, self.root / 'ops' / file)
         shutil.copytree(self.candidate / 'database/migrations', self.root / 'database/migrations', dirs_exist_ok=True)
         self.assertEqual(self.run_preflight(installed=True).returncode, 0)
+
+    def test_configurator_only_accepts_explicit_reviewed_catalog_and_profiles(self):
+        db = self.fixture['config']['database']['connections']['mysql']
+        db.update({'host': 'fixture.local', 'port': '3306'})
+        config = {
+            'preview_enabled': True, 'purchase_enabled': True, 'production_approved': True,
+            'catalog': {'environment': 'production', 'driver': 'mysql', 'host': 'fixture.local',
+                        'port': '3306', 'database': 'fixture_prod'},
+            'profiles': {'vehicle-oem-reference-v1': {'version': 1, 'enabled': True}},
+            'products': {'123': {'profile_id': 'vehicle-oem-reference-v1', 'profile_version': 1, 'reviewed': True, 'approved_variant_ids': [456]}},
+        }
+        self.fixture['config']['product_configurator'] = config
+        self.assertEqual(self.run_preflight().returncode, 0)
+        for key, value in [('production_approved', False), ('products', {}), ('catalog', None)]:
+            old = config[key]
+            config[key] = value
+            self.assertEqual(self.run_preflight().returncode, 1)
+            config[key] = old
+        config['products']['123']['reviewed'] = False
+        self.assertEqual(self.run_preflight().returncode, 1)
 
     def test_sandbox_mixed_missing_or_unsafe_credentials_fail_with_safe_identifiers(self):
         wompi = self.fixture['config']['services']['wompi']
