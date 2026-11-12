@@ -47,6 +47,9 @@ class ProductConfiguratorRegistry
                 && ($local || $this->approvedVariantIds($product) !== [])
                 && Schema::connection($product->getConnectionName())->hasColumn('order_items', 'configuration_context'),
             ...(app()->environment('production') ? ['purchasable_variant_ids' => $this->approvedVariantIds($product)] : []),
+            // A reviewed physical reference can be identified by its exact OEM.
+            // Technical OEM introduction dates still constrain any supplied year.
+            'year_optional_variant_ids' => $ui ? $this->yearOptionalVariantIds($product) : [],
         ];
     }
 
@@ -55,6 +58,48 @@ class ProductConfiguratorRegistry
     {
         return ! app()->environment('production')
             || in_array($variant->id, $this->approvedVariantIds($product), true);
+    }
+
+    /** Only individually reviewed memory references for one known vehicle qualify.
+     * Commercial year limits are never waived, nor are missing/ambiguous vehicle rows.
+     */
+    public function yearOptionalVariantIds(Product $product): array
+    {
+        $entry = config('product_configurator.products.'.$product->id, []);
+        if (($entry['reviewed'] ?? false) !== true
+            || ($entry['profile_id'] ?? null) !== 'vehicle-oem-memory-v1'
+            || ($entry['profile_version'] ?? null) !== 1 || ! $this->matchesCatalog($product)) {
+            return [];
+        }
+        $approved = $this->approvedVariantIds($product);
+        if ($approved === []) {
+            return [];
+        }
+        // Query the whole public product; a filtered API relation cannot prove uniqueness.
+        $variants = $product->variants()->where('is_active', true)->where('is_visible', true)
+            ->with('vehicleCompatibilities')->get();
+        $vehicles = [];
+        $optional = [];
+        foreach ($variants as $variant) {
+            if (($variant->compatibility_type ?? $product->compatibility_type) !== 'vehicle_specific'
+                || $variant->vehicleCompatibilities->isEmpty()) {
+                return [];
+            }
+            $commercialYearLimit = false;
+            foreach ($variant->vehicleCompatibilities as $row) {
+                $tuple = [$row->vehicle_brand_id, $row->vehicle_model_id, $row->vehicle_version_id];
+                if (in_array(null, $tuple, true) || ! $row->vehicle_multimedia_system_id) {
+                    return [];
+                }
+                $vehicles[implode(':', $tuple)] = true;
+                $commercialYearLimit = $commercialYearLimit || $row->year_from !== null || $row->year_to !== null;
+            }
+            if (! $commercialYearLimit && in_array($variant->id, $approved, true)) {
+                $optional[] = $variant->id;
+            }
+        }
+
+        return count($vehicles) === 1 ? $optional : [];
     }
 
     private function approvedVariantIds(Product $product): array

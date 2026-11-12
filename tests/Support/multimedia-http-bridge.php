@@ -17,6 +17,10 @@ try {
     MultimediaSqliteApplication::migrate($app);
     $profile = ($argv[2] ?? '') === 'reference' ? 'vehicle-oem-reference-v1' : 'vehicle-oem-memory-v1';
     $fixture = MultimediaFixture::create($profile, $profile === 'vehicle-oem-memory-v1' ? 'BMW' : 'Toyota');
+    if (($argv[2] ?? '') === 'memory-reviewed') {
+        config(['product_configurator.products.'.$fixture['product']->id.'.reviewed' => true,
+            'product_configurator.products.'.$fixture['product']->id.'.approved_variant_ids' => [$fixture['variant']->id]]);
+    }
     $kernel = $app->make(Kernel::class);
     echo json_encode(['ready' => true, 'driver' => 'sqlite', 'database' => ':memory:', 'slug' => $fixture['product']->slug,
         'context' => $fixture['context'], 'variant_id' => $fixture['variant']->id,

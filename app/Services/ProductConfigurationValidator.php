@@ -53,6 +53,7 @@ class ProductConfigurationValidator
         if ($year !== null && (! is_int($year) || $year < 1900 || $year > 2100)) {
             $this->invalid('El año seleccionado no es válido.');
         }
+        $identifiedOem = in_array($variant->id, $registration['year_optional_variant_ids'] ?? [], true);
 
         $rows = $variant->vehicleCompatibilities()->with(['vehicleBrand', 'vehicleModel', 'vehicleVersion.multimediaSystems', 'vehicleMultimediaSystem']);
         PublicVehicleCompatibility::matchRow($rows->getQuery(), new Request($context));
@@ -61,7 +62,7 @@ class ProductConfigurationValidator
             && (int) $row->vehicleModel->vehicle_brand_id === $context['vehicle_brand_id']
             && (int) $row->vehicleVersion->vehicle_model_id === $context['vehicle_model_id']
             && (int) $row->vehicleMultimediaSystem->vehicle_brand_id === $context['vehicle_brand_id']
-            && ($year !== null || ! VehicleYearCoverage::requiresYear(
+            && ($year !== null || $identifiedOem || ! VehicleYearCoverage::requiresYear(
                 $row->vehicleVersion->year_from, $row->vehicleVersion->year_to, $row->year_from, $row->year_to,
                 $row->vehicleVersion->multimediaSystems->where('id', $row->vehicle_multimedia_system_id)
                     ->map(fn ($system) => ['year_from' => $system->pivot?->year_from, 'year_to' => $system->pivot?->year_to])->all()

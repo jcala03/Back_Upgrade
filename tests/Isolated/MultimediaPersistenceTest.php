@@ -96,6 +96,78 @@ class MultimediaPersistenceTest extends TestCase
         return [['vehicle-oem-memory-v1', 'BMW'], ['vehicle-oem-reference-v1', 'Toyota']];
     }
 
+    #[DataProvider('identifiedOems')]
+    public function test_reviewed_approved_reference_uses_explicit_oem_without_fabricating_a_year(int $oemIndex, string $environment): void
+    {
+        extract(MultimediaFixture::create());
+        $this->app->instance('env', $environment);
+        config(['product_configurator.products.'.$product->id.'.reviewed' => true,
+            'product_configurator.products.'.$product->id.'.approved_variant_ids' => [$variant->id],
+            'product_configurator.production_approved' => true,
+            'product_configurator.catalog' => app(ProductConfiguratorRegistry::class)->catalogIdentity($product)]);
+        try {
+            $this->getJson('/api/products/'.$product->slug)->assertOk()
+                ->assertJsonPath('data.configuration.year_optional_variant_ids', [$variant->id]);
+            $payload['items'][0]['configuration_context']['year'] = null;
+            $payload['items'][0]['configuration_context']['vehicle_multimedia_system_id'] = $oems[$oemIndex]->id;
+            $this->withHeader('Idempotency-Key', 'identified-oem')->postJson('/api/orders', $payload)->assertCreated()
+                ->assertJsonPath('data.items.0.configuration_context.year', null)
+                ->assertJsonPath('data.items.0.configuration_context.vehicle_multimedia_system_id', $oems[$oemIndex]->id)
+                ->assertJsonPath('data.items.0.unit_price', 1200000);
+            $this->withHeader('Idempotency-Key', 'identified-oem')->postJson('/api/orders', $payload)->assertOk();
+            app(ProductConfigurationValidator::class)->revalidateOrder(Order::sole());
+            $this->assertDatabaseCount('orders', 1);
+            $this->assertSame(3, $stock->fresh()->quantity);
+            $this->assertDatabaseCount('inventory_movements', 0);
+            $this->assertDatabaseCount('payments', 0);
+            Http::assertNothingSent();
+        } finally {
+            $this->app->instance('env', 'testing');
+        }
+    }
+
+    public static function identifiedOems(): array
+    {
+        return [[0, 'testing'], [1, 'testing'], [0, 'production'], [1, 'production']];
+    }
+
+    #[DataProvider('identifiedOemRejections')]
+    public function test_identified_oem_does_not_bypass_years_approval_or_same_row_validation(string $case): void
+    {
+        extract(MultimediaFixture::create($case === 'linux' ? 'vehicle-oem-reference-v1' : 'vehicle-oem-memory-v1'));
+        config(['product_configurator.products.'.$product->id.'.reviewed' => true,
+            'product_configurator.products.'.$product->id.'.approved_variant_ids' => [$variant->id]]);
+        $payload['items'][0]['configuration_context']['year'] = null;
+        if ($case === 'supplied_invalid_year') {
+            $payload['items'][0]['configuration_context']['year'] = 2014;
+        } elseif ($case === 'commercial_year_limit') {
+            $variant->vehicleCompatibilities()->update(['year_from' => 2012, 'year_to' => 2013]);
+        } elseif ($case === 'unreviewed') {
+            config(['product_configurator.products.'.$product->id.'.reviewed' => false]);
+        } elseif ($case === 'unapproved') {
+            config(['product_configurator.products.'.$product->id.'.approved_variant_ids' => []]);
+        } elseif ($case === 'multiple_vehicles') {
+            $other = $model->versions()->create(['name' => 'Other generation', 'year_from' => 2012, 'year_to' => 2018, 'is_active' => true]);
+            $variant->vehicleCompatibilities()->create(['vehicle_brand_id' => $brand->id, 'vehicle_model_id' => $model->id,
+                'vehicle_version_id' => $other->id, 'vehicle_multimedia_system_id' => $oems[0]->id]);
+        } elseif ($case === 'wrong_oem') {
+            $payload['items'][0]['configuration_context']['vehicle_multimedia_system_id'] += 999;
+        } elseif ($case === 'client_optional_year') {
+            config(['product_configurator.products.'.$product->id.'.reviewed' => false]);
+            $payload['items'][0]['configuration_context']['year_optional_variant_ids'] = [$variant->id];
+        }
+        $this->withHeader('Idempotency-Key', 'identified-reject-'.$case)->postJson('/api/orders', $payload)->assertUnprocessable();
+        $this->assertDatabaseCount('orders', 0);
+        $this->assertDatabaseCount('payments', 0);
+        $this->assertDatabaseCount('inventory_movements', 0);
+    }
+
+    public static function identifiedOemRejections(): array
+    {
+        return array_map(fn ($case) => [$case], ['supplied_invalid_year', 'commercial_year_limit', 'unreviewed',
+            'unapproved', 'multiple_vehicles', 'wrong_oem', 'client_optional_year', 'linux']);
+    }
+
     #[DataProvider('yearBoundaries')]
     public function test_exact_technical_year_boundaries_survive_sql(int $oemIndex, int $year): void
     {
