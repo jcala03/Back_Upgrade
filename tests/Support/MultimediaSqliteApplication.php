@@ -6,6 +6,7 @@ use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Bootstrap\LoadConfiguration;
+use Illuminate\Session\Middleware\StartSession;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
@@ -43,6 +44,8 @@ final class MultimediaSqliteApplication
             ]);
         });
         $app->make(Kernel::class)->bootstrap();
+        // CRM identities in this harness also have an isolated session container.
+        $app['router']->pushMiddlewareToGroup('api', StartSession::class);
         self::guard($app);
         DB::connection()->getPdo()->sqliteCreateCollation('utf8mb4_bin', strcmp(...));
         Http::preventStrayRequests();

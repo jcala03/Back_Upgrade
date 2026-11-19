@@ -8,6 +8,7 @@ use Illuminate\Database\Query\Builder;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Bootstrap\LoadConfiguration;
 use Illuminate\Foundation\Testing\TestCase;
+use Illuminate\Session\Middleware\StartSession;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Route;
@@ -72,6 +73,8 @@ class ApiAuthenticationResponseTest extends TestCase
     #[DataProvider('acceptHeaders')]
     public function test_authenticated_api_retains_the_existing_user_payload(array $headers): void
     {
+        // Supply a real in-memory session container for this mocked identity.
+        $this->app['router']->pushMiddlewareToGroup('api', StartSession::class);
         $user = Mockery::mock(User::class)->makePartial();
         $user->forceFill(['id' => 901, 'name' => 'Isolated auth fixture', 'email' => 'auth@example.test',
             'role' => User::ROLE_ADMIN, 'is_active' => true]);
@@ -105,6 +108,7 @@ class ApiAuthenticationResponseTest extends TestCase
 
     public function test_inactive_users_are_still_forbidden(): void
     {
+        $this->app['router']->pushMiddlewareToGroup('api', StartSession::class);
         $user = new User;
         $user->forceFill(['id' => 902, 'role' => User::ROLE_USER, 'is_active' => false]);
         Sanctum::actingAs($user);

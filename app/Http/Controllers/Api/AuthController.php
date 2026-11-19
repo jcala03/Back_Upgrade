@@ -7,6 +7,7 @@ use App\Http\Requests\UpdatePasswordRequest;
 use App\Http\Requests\UpdateProfileRequest;
 use App\Models\PushSubscription;
 use App\Models\User;
+use App\Services\CrmSessionActivity;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
@@ -46,6 +47,8 @@ class AuthController extends Controller
             ]);
         }
 
+        app(CrmSessionActivity::class)->start($request);
+
         return response()->json([
             'message' => 'Login correcto.',
             'user' => $this->userPayload($user),
@@ -57,6 +60,16 @@ class AuthController extends Controller
         return response()->json([
             'user' => $this->userPayload($request->user()),
         ]);
+    }
+
+    public function sessionStatus(Request $request)
+    {
+        return response()->json(['session' => app(CrmSessionActivity::class)->metadata($request)]);
+    }
+
+    public function activity(Request $request)
+    {
+        return response()->json(['session' => app(CrmSessionActivity::class)->touch($request)]);
     }
 
     public function updateProfile(UpdateProfileRequest $request)
@@ -78,17 +91,19 @@ class AuthController extends Controller
 
     public function logout(Request $request)
     {
+        if ($request->has('idle_session_id')) {
+            $request->validate(['idle_session_id' => ['required', 'string', 'regex:/^[a-f0-9]{64}$/']]);
+            $id = app(CrmSessionActivity::class)->metadata($request)['session_id'];
+            if (! is_string($id) || ! hash_equals($id, $request->input('idle_session_id'))) {
+                return response()->json(['message' => 'La sesión cambió. Recarga la página.'], 409);
+            }
+        }
         // Only the current browser; other devices belonging to this account remain subscribed.
         if (is_string($endpoint = $request->input('push_endpoint')) && strlen($endpoint) <= 2048) {
             PushSubscription::where('user_id', $request->user()->id)
                 ->where('endpoint_hash', hash('sha256', $endpoint))->update(['is_active' => false]);
         }
-        Auth::guard('web')->logout();
-
-        if ($request->hasSession()) {
-            $request->session()->invalidate();
-            $request->session()->regenerateToken();
-        }
+        app(CrmSessionActivity::class)->end($request);
 
         return response()->json([
             'message' => 'Sesión cerrada correctamente.',

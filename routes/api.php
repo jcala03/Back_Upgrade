@@ -48,6 +48,7 @@ use App\Http\Controllers\Api\VehicleModelController;
 use App\Http\Controllers\Api\VehicleMultimediaSystemController;
 use App\Http\Controllers\Api\VehicleVersionController;
 use App\Http\Controllers\Api\WompiWebhookController;
+use App\Http\Middleware\EnsureCrmSessionIsActive;
 use App\Http\Middleware\EnsureUserIsActive;
 use Illuminate\Support\Facades\Route;
 use Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful;
@@ -104,7 +105,7 @@ Route::post('/checkout/orders/{publicToken}/pickup', [CheckoutOrderController::c
 |--------------------------------------------------------------------------
 */
 
-Route::middleware(['auth:sanctum', EnsureUserIsActive::class])->group(function () {
+Route::middleware(['auth:sanctum', EnsureCrmSessionIsActive::class, EnsureUserIsActive::class])->group(function () {
     // Existing CRM documents, never public links or alternative commercial records.
     foreach ([
         ['admin/quotations', 'quotation', 'admin'],
@@ -119,6 +120,8 @@ Route::middleware(['auth:sanctum', EnsureUserIsActive::class])->group(function (
         }
     }
     Route::get('/auth/me', [AuthController::class, 'me']);
+    Route::get('/auth/session', [AuthController::class, 'sessionStatus']);
+    Route::post('/auth/activity', [AuthController::class, 'activity'])->middleware('throttle:12,1');
     Route::prefix('push')->middleware('throttle:60,1')->group(function () {
         Route::get('/config', [PushSubscriptionController::class, 'config']);
         Route::get('/subscriptions', [PushSubscriptionController::class, 'index']);
